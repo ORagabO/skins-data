@@ -1,10 +1,24 @@
 import time
 import json
+import subprocess
 from bs4 import BeautifulSoup
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+
+def get_chrome_major_version():
+    try:
+        # Ask the operating system for the installed Chrome version
+        process = subprocess.run(['google-chrome', '--version'], capture_output=True, text=True)
+        version_string = process.stdout.strip()
+        # Extract the major version number (e.g., "Google Chrome 150.0.7871.128" -> 150)
+        major_version = int(version_string.split()[2].split('.')[0])
+        print(f"Detected Chrome major version: {major_version}")
+        return major_version
+    except Exception as e:
+        print(f"Could not determine Chrome version: {e}")
+        return None
 
 def get_most_used_skins():
     options = uc.ChromeOptions()
@@ -13,13 +27,17 @@ def get_most_used_skins():
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
     
-    driver = uc.Chrome(options=options)
+    # 1. Fetch the exact Chrome version dynamically
+    major_version = get_chrome_major_version()
+    
+    # 2. Force the driver to use the matching version
+    driver = uc.Chrome(options=options, version_main=major_version)
     
     print("Loading laby.net...")
     driver.get("https://laby.net/skins?order=most_used")
     
     try:
-        # Wait for ANY image to load inside the main grid instead of a specific URL text
+        # Wait for ANY image to load inside the main grid
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "img"))
         )
@@ -40,7 +58,6 @@ def get_most_used_skins():
             
             # Look for links that lead to textures/skins
             if '/texture/' in href or '/skin/' in href:
-                # Make sure the URL is complete
                 skin_url = f"https://laby.net{href}" if href.startswith('/') else href
                 
                 img = card.find("img")

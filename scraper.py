@@ -1,40 +1,59 @@
-import requests
+from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 import json
 
 URL = "https://laby.net/skins?order=most_used"
 
-headers = {
-    "User-Agent": "Mozilla/5.0"
-}
+skins = []
 
-response = requests.get(URL, headers=headers)
-html = response.text
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+
+    page = browser.new_page(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36"
+    )
+
+    page.goto(URL, wait_until="networkidle")
+
+    # Scroll several times to load more skins
+    for _ in range(20):
+        page.mouse.wheel(0, 5000)
+        page.wait_for_timeout(1000)
+
+    html = page.content()
+
+    browser.close()
 
 soup = BeautifulSoup(html, "html.parser")
 
-skins = []
+# Save HTML for debugging
+with open("page.html", "w", encoding="utf-8") as f:
+    f.write(html)
 
-# NOTE: You will need to adjust these selectors after inspecting the page
-cards = soup.select("a")
+links = soup.find_all("a", href=True)
 
-for card in cards:
-    href = card.get("href")
-    if href and "/skin/" in href:
-        skins.append({
-            "url": "https://laby.net" + href
-        })
-
-# remove duplicates
-unique = []
 seen = set()
 
-for s in skins:
-    if s["url"] not in seen:
-        seen.add(s["url"])
-        unique.append(s)
+for link in links:
+
+    href = link["href"]
+
+    if "/skin/" not in href:
+        continue
+
+    if href.startswith("/"):
+        href = "https://laby.net" + href
+
+    if href in seen:
+        continue
+
+    seen.add(href)
+
+    skins.append({
+        "url": href
+    })
 
 with open("skins.json", "w", encoding="utf-8") as f:
-    json.dump(unique, f, ensure_ascii=False, indent=2)
+    json.dump(skins, f, indent=4)
 
-print(f"Saved {len(unique)} skins")
+print("Found", len(skins), "skins")

@@ -28,10 +28,17 @@ jobs:
       - name: Run Scraper
         run: python scraper.py
 
+      - name: Upload Error Screenshot
+        if: failure() # This tells GitHub to ONLY run this step if the previous step failed
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-screenshot
+          path: error_screenshot.png
+
       - name: Commit and push changes
         run: |
           git config --global user.name "github-actions[bot]"
-              git config --global user.email "github-actions[bot]@users.noreply.github.com"
-              git add skins_data.json || true
-              git diff --quiet && git diff --staged --quiet || git commit -m "Automated update: laby.net skins data"
-              git push
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add skins_data.json || true
+          git diff --quiet && git diff --staged --quiet || git commit -m "Automated update: laby.net skins data"
+          git push

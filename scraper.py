@@ -48,6 +48,8 @@ def get_most_used_skins():
             
     except Exception as e:
         print(f"An error occurred: {e}")
+        driver.save_screenshot("error_screenshot.png") # Takes a picture of the screen to see if we got blocked
+        raise e # <--- THIS IS THE NEW LINE. It forces the script to report the failure.
     finally:
         driver.quit()
 

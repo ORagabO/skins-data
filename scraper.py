@@ -18,8 +18,7 @@ def get_chrome_major_version():
 
 def get_skins_data():
     # --- SCRAPER SETTINGS ---
-    MAX_SCROLLS = 5          # How many times to scroll the main page to load more skins
-    MAX_SKINS_TO_VISIT = 20  # Limit how many individual pages to open (Prevents GitHub timeout). Set to a high number to do all.
+    MAX_SCROLLS = 10  # Increase this to load even more skins from the main page!
     # ------------------------
 
     options = uc.ChromeOptions()
@@ -32,9 +31,6 @@ def get_skins_data():
     driver = uc.Chrome(options=options, version_main=major_version)
     
     try:
-        # ==========================================
-        # PHASE 1: SCROLL & COLLECT SKIN URLS
-        # ==========================================
         print("Loading laby.net main page...")
         driver.get("https://laby.net/skins?order=most_used")
         
@@ -51,82 +47,46 @@ def get_skins_data():
         soup = BeautifulSoup(driver.page_source, "html.parser")
         skin_cards = soup.find_all("a", href=lambda h: h and h.startswith("/skins/"))
         
-        initial_results = []
+        results = []
         for card in skin_cards:
-            href = card.get('href')
+            href = card.get('href') # Looks like: /skins/42bd21cda31e6e87aa886c576de87555
             img = card.find("img")
             
             if img:
                 skin_url = f"https://laby.net{href}"
-                img_url = img.get('src')
                 skin_name = img.get('alt', 'Unknown Skin')
                 
                 usage_span = card.find("span", class_="font-semibold")
                 usage_count = usage_span.text.strip() if usage_span else "0"
 
-                initial_results.append({
+                # Extract the unique texture hash
+                skin_hash = href.split('/')[-1] 
+                
+                # 1. The Raw Texture File (The 2D flattened skin for downloading)
+                direct_download_url = f"http://textures.minecraft.net/texture/{skin_hash}"
+
+                # 2. The 3D Rendered Image (Using the Laby.net API)
+                # You can modify height and width here if you need a different size
+                render_url = f"https://laby.net/api/v3/render/skin/{skin_hash}.png?height=500&width=500"
+
+                results.append({
                     "name": skin_name,
                     "uses": usage_count,
                     "skin_url": skin_url, 
-                    "preview_image": img_url
+                    "texture_hash": skin_hash,
+                    "download_url": direct_download_url,
+                    "3d_render_url": render_url
                 })
         
         # Deduplicate
-        unique_skins = list({res['skin_url']: res for res in initial_results}.values())
-        print(f"Collected {len(unique_skins)} unique skin links from the main page.\n")
+        unique_skins = list({res['skin_url']: res for res in results}.values())
+        print(f"\nSuccessfully collected and generated download/render links for {len(unique_skins)} skins!")
 
-        # ==========================================
-        # PHASE 2: VISIT EACH CARD FOR DOWNLOAD URL
-        # ==========================================
-        final_data = []
-        skins_to_process = unique_skins[:MAX_SKINS_TO_VISIT]
-        
-        print(f"Visiting {len(skins_to_process)} individual skin pages to find download links...")
-        
-        for index, skin in enumerate(skins_to_process):
-            print(f"[{index+1}/{len(skins_to_process)}] Extracting: {skin['name']}")
-            driver.get(skin['skin_url'])
-            
-            try:
-                # Wait for the inner page to render
-                WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.TAG_NAME, "main"))
-                )
-                time.sleep(1) # Brief pause for dynamic React elements
-                
-                detail_soup = BeautifulSoup(driver.page_source, "html.parser")
-                
-                # Strategy: Look for an anchor tag with the 'download' attribute or containing the word 'Download'
-                download_url = None
-                
-                # 1. Try finding a link with a 'download' attribute
-                dl_element = detail_soup.find("a", attrs={"download": True})
-                
-                # 2. Fallback: Try finding a button/link with "Download" text
-                if not dl_element:
-                    dl_element = detail_soup.find("a", string=lambda text: text and "Download" in text, href=True)
-                
-                if dl_element:
-                    href = dl_element.get('href')
-                    # Ensure full URL formatting
-                    download_url = f"https://laby.net{href}" if href.startswith('/') else href
-                
-                # Add the final download link to our data object
-                skin["download_url"] = download_url or "Download button not found"
-                final_data.append(skin)
-                
-            except Exception as e:
-                print(f"  -> Failed to load download link for {skin['skin_url']}: {e}")
-                skin["download_url"] = "Error loading page"
-                final_data.append(skin)
-
-        # ==========================================
-        # PHASE 3: SAVE TO JSON
-        # ==========================================
+        # Save to JSON
         with open("skins_data.json", "w") as f:
-            json.dump(final_data, f, indent=4)
+            json.dump(unique_skins, f, indent=4)
             
-        print(f"\nSuccessfully saved {len(final_data)} complete skin records to skins_data.json")
+        print("Data saved to skins_data.json")
 
     except Exception as e:
         print(f"A critical error occurred: {e}")

@@ -1,99 +1,87 @@
-import time
 import json
-import subprocess
+import time
+import cloudscraper
 from bs4 import BeautifulSoup
-import undetected_chromedriver as uc
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
-def get_chrome_major_version():
-    try:
-        process = subprocess.run(['google-chrome', '--version'], capture_output=True, text=True)
-        version_string = process.stdout.strip()
-        major_version = int(version_string.split()[2].split('.')[0])
-        return major_version
-    except Exception as e:
-        return None
-
-def get_skins_data():
-    # --- SCRAPER SETTINGS ---
-    MAX_SCROLLS = 10  # Increase this to load even more skins from the main page!
-    # ------------------------
-
-    options = uc.ChromeOptions()
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1920,1080")
+def get_all_skins_data():
+    print("Initializing Cloudflare bypass...")
     
-    major_version = get_chrome_major_version()
-    driver = uc.Chrome(options=options, version_main=major_version)
+    scraper = cloudscraper.create_scraper(
+        browser={
+            'browser': 'chrome',
+            'platform': 'android',
+            'desktop': False
+        }
+    )
     
-    try:
-        print("Loading laby.net main page...")
-        driver.get("https://laby.net/skins?order=most_used")
+    all_skins = []
+    page = 1
+    
+    while True:
+        # Append the page number to the URL to handle pagination
+        url = f"https://laby.net/skins?order=most_used&page={page}"
+        print(f"Fetching page {page}...")
         
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "a[href^='/skins/']"))
-        )
-        
-        # Scroll to load pagination
-        for i in range(MAX_SCROLLS):
-            print(f"Scrolling down to load more cards ({i+1}/{MAX_SCROLLS})...")
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(3) # Wait for new cards to pop in
+        try:
+            response = scraper.get(url)
             
-        soup = BeautifulSoup(driver.page_source, "html.parser")
-        skin_cards = soup.find_all("a", href=lambda h: h and h.startswith("/skins/"))
-        
-        results = []
-        for card in skin_cards:
-            href = card.get('href') # Looks like: /skins/42bd21cda31e6e87aa886c576de87555
-            img = card.find("img")
-            
-            if img:
-                skin_url = f"https://laby.net{href}"
-                skin_name = img.get('alt', 'Unknown Skin')
+            if response.status_code != 200:
+                print(f"Failed to load page {page}. Cloudflare block or server error. Status code: {response.status_code}")
+                break
                 
-                usage_span = card.find("span", class_="font-semibold")
-                usage_count = usage_span.text.strip() if usage_span else "0"
-
-                # Extract the unique texture hash
-                skin_hash = href.split('/')[-1] 
-                
-                # 1. The Raw Texture File (The 2D flattened skin for downloading)
-                direct_download_url = f"http://textures.minecraft.net/texture/{skin_hash}"
-
-                # 2. The 3D Rendered Image (Using the Laby.net API)
-                # You can modify height and width here if you need a different size
-                render_url = f"https://laby.net/api/v3/render/skin/{skin_hash}.png?height=500&width=500"
-
-                results.append({
-                    "name": skin_name,
-                    "uses": usage_count,
-                    "skin_url": skin_url, 
-                    "texture_hash": skin_hash,
-                    "download_url": direct_download_url,
-                    "3d_render_url": render_url
-                })
-        
-        # Deduplicate
-        unique_skins = list({res['skin_url']: res for res in results}.values())
-        print(f"\nSuccessfully collected and generated download/render links for {len(unique_skins)} skins!")
-
-        # Save to JSON
-        with open("skins_data.json", "w") as f:
-            json.dump(unique_skins, f, indent=4)
+            soup = BeautifulSoup(response.text, "html.parser")
+            skin_cards = soup.find_all("a", href=lambda h: h and h.startswith("/skins/"))
             
-        print("Data saved to skins_data.json")
+            # If no skins are found on the current page, we have reached the end of the database
+            if not skin_cards:
+                print("No more skins found. Reached the end of the list!")
+                break
+                
+            for card in skin_cards:
+                href = card.get('href')
+                img = card.find("img")
+                
+                if img:
+                    skin_url = f"https://laby.net{href}"
+                    skin_name = img.get('alt', 'Unknown Skin')
+                    
+                    usage_span = card.find("span", class_="font-semibold")
+                    usage_count = usage_span.text.strip() if usage_span else "0"
 
-    except Exception as e:
-        print(f"A critical error occurred: {e}")
-        driver.save_screenshot("error_screenshot.png")
-        raise e
-    finally:
-        driver.quit()
+                    skin_hash = href.split('/')[-1] 
+                    direct_download_url = f"http://textures.minecraft.net/texture/{skin_hash}"
+                    render_url = f"https://laby.net/api/v3/render/skin/{skin_hash}.png?height=500&width=500"
+
+                    all_skins.append({
+                        "name": skin_name,
+                        "uses": usage_count,
+                        "skin_url": skin_url, 
+                        "texture_hash": skin_hash,
+                        "download_url": direct_download_url,
+                        "3d_render_url": render_url
+                    })
+            
+            print(f"Successfully scraped page {page}.")
+            
+            # Increment to the next page
+            page += 1
+            
+            # IMPORTANT: Polite delay to avoid IP bans
+            time.sleep(2)
+            
+        except Exception as e:
+            print(f"An error occurred on page {page}: {e}")
+            break
+
+    # Deduplicate the final massive list
+    unique_skins = list({res['skin_url']: res for res in all_skins}.values())
+    print(f"\nFinished! Collected a total of {len(unique_skins)} skins.")
+
+    # Save to a master JSON file
+    with open("all_skins_data.json", "w") as f:
+        json.dump(unique_skins, f, indent=4)
+        
+    print("Data successfully saved to all_skins_data.json.")
 
 if __name__ == "__main__":
-    get_skins_data()
+    get_all_skins_data()

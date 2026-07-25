@@ -4,37 +4,43 @@ import cloudscraper
 from bs4 import BeautifulSoup
 
 def get_all_skins_data():
-    print("Initializing Cloudflare bypass...")
+    print("Initializing Cloudscraper for GitHub Actions...")
     
+    # Set to Linux desktop since GitHub Actions runs on Ubuntu
     scraper = cloudscraper.create_scraper(
         browser={
             'browser': 'chrome',
-            'platform': 'android',
-            'desktop': False
+            'platform': 'linux',
+            'desktop': True
         }
     )
     
     all_skins = []
     page = 1
     
-    while True:
-        # Append the page number to the URL to handle pagination
+    # --- GITHUB ACTIONS SAFEGUARD ---
+    # GitHub kills scripts after 6 hours. 
+    # 500 pages @ 2 seconds per page = ~20 minutes of runtime. 
+    # Increase this number if you want it to run longer, but keep it under 5000!
+    MAX_PAGES = 500 
+    # --------------------------------
+    
+    while page <= MAX_PAGES:
         url = f"https://laby.net/skins?order=most_used&page={page}"
-        print(f"Fetching page {page}...")
+        print(f"Fetching page {page}/{MAX_PAGES}...")
         
         try:
             response = scraper.get(url)
             
             if response.status_code != 200:
-                print(f"Failed to load page {page}. Cloudflare block or server error. Status code: {response.status_code}")
+                print(f"Failed to load page {page}. Status code: {response.status_code}")
                 break
                 
             soup = BeautifulSoup(response.text, "html.parser")
             skin_cards = soup.find_all("a", href=lambda h: h and h.startswith("/skins/"))
             
-            # If no skins are found on the current page, we have reached the end of the database
             if not skin_cards:
-                print("No more skins found. Reached the end of the list!")
+                print("No more skins found. Reached the end of the database!")
                 break
                 
             for card in skin_cards:
@@ -61,27 +67,25 @@ def get_all_skins_data():
                         "3d_render_url": render_url
                     })
             
-            print(f"Successfully scraped page {page}.")
-            
             # Increment to the next page
             page += 1
             
-            # IMPORTANT: Polite delay to avoid IP bans
+            # Polite delay to avoid GitHub's IP getting banned by Cloudflare
             time.sleep(2)
             
         except Exception as e:
             print(f"An error occurred on page {page}: {e}")
             break
 
-    # Deduplicate the final massive list
+    # Deduplicate the list
     unique_skins = list({res['skin_url']: res for res in all_skins}.values())
-    print(f"\nFinished! Collected a total of {len(unique_skins)} skins.")
+    print(f"\nFinished! Collected a total of {len(unique_skins)} unique skins.")
 
-    # Save to a master JSON file
-    with open("all_skins_data.json", "w") as f:
+    # Save to JSON
+    with open("skins_data.json", "w") as f:
         json.dump(unique_skins, f, indent=4)
         
-    print("Data successfully saved to all_skins_data.json.")
+    print("Data successfully saved to skins_data.json.")
 
 if __name__ == "__main__":
     get_all_skins_data()

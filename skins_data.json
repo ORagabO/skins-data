@@ -7488,6 +7488,12 @@
         "3d_render_url": "https://laby.net/api/v3/render/skin/85b40b07062b34b210b3fc08d957aa2e.png?height=500&width=500"
     },
     {
+        "texture_hash": "23586fb613b4c706df79d982737a7c41",
+        "skin_url": "https://laby.net/skin/23586fb613b4c706df79d982737a7c41",
+        "download_url": "http://textures.minecraft.net/texture/23586fb613b4c706df79d982737a7c41",
+        "3d_render_url": "https://laby.net/api/v3/render/skin/23586fb613b4c706df79d982737a7c41.png?height=500&width=500"
+    },
+    {
         "texture_hash": "5a44085c150887562d39e419c28adaec",
         "skin_url": "https://laby.net/skin/5a44085c150887562d39e419c28adaec",
         "download_url": "http://textures.minecraft.net/texture/5a44085c150887562d39e419c28adaec",
@@ -7498,12 +7504,6 @@
         "skin_url": "https://laby.net/skin/2613389b59b15224d360ae72bfa5b1f8",
         "download_url": "http://textures.minecraft.net/texture/2613389b59b15224d360ae72bfa5b1f8",
         "3d_render_url": "https://laby.net/api/v3/render/skin/2613389b59b15224d360ae72bfa5b1f8.png?height=500&width=500"
-    },
-    {
-        "texture_hash": "23586fb613b4c706df79d982737a7c41",
-        "skin_url": "https://laby.net/skin/23586fb613b4c706df79d982737a7c41",
-        "download_url": "http://textures.minecraft.net/texture/23586fb613b4c706df79d982737a7c41",
-        "3d_render_url": "https://laby.net/api/v3/render/skin/23586fb613b4c706df79d982737a7c41.png?height=500&width=500"
     },
     {
         "texture_hash": "5df3a2f0ea3bf2d4a0c5d7906f0d960f",

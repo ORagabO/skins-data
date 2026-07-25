@@ -15,7 +15,7 @@ def get_all_skins_data():
     
     all_skins = []
     page = 1
-    MAX_PAGES = 500 
+    MAX_PAGES = 5000 
     PAGE_SIZE = 36 # Based on the size parameter in your API URL
     
     while page <= MAX_PAGES:

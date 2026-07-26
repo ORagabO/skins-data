@@ -152,9 +152,8 @@ def get_all_skins_data():
                 all_skins.append({
                     "id": sid,
                     "name": slug.replace("-", " ").strip(),
-                    "skin_url": f"{BASE}/skin/{sid}/{slug}/",
-                    "download_url": f"{BASE}/skin/download/{sid}",
-                    "preview_url": previews.get(sid),
+                    "image_url": previews.get(sid),                 # direct .png image (was skin_url/view page)
+                    "download_url": f"{BASE}/skin/download/{sid}",  # raw 64x64 skin file
                 })
 
             print(f"  Collected {len(page_ids)} skins (running total: {len(all_skins)}).")

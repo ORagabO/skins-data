@@ -23,11 +23,13 @@ import sys
 ENABLE_LABY = True
 ENABLE_SKINDEX = True
 ENABLE_NAMEMC = True
+ENABLE_MCNET = True        # minecraftskins.net (server-rendered, no browser needed)
 ENABLE_MINESKIN = False    # replaced by NameMC
 
 LABY_TARGET = 2000        # approx skins from laby.net
 SKINDEX_PAGES = 40        # gallery pages (~48 skins each)
 NAMEMC_PAGES = 20         # namemc pages
+MCNET_PAGES = 25          # minecraftskins.net listing pages (~12 skins each, 25 = all)
 MINESKIN_PAGES = 20       # (only used if ENABLE_MINESKIN)
 
 OUTPUT = "skins_all.json"
@@ -304,6 +306,58 @@ def scrape_namemc(max_pages):
     return out
 
 
+# -------------------------------------------------------- minecraftskins.net --
+# Fully server-rendered (no browser needed). Each card:
+#   <a href="/<slug>"><img src="/static/front_preview/<slug>.png" alt="<Name>" ...></a>
+#   ...<a class="control" href="/<slug>/download">Download</a>
+# So we fetch the HTML with cloudscraper and regex out slug + name + image.
+NET_BASE = "https://www.minecraftskins.net"
+NET_IMG_RE = re.compile(
+    r'src="(/static/front_preview/([^"./]+)\.png)"[^>]*?alt="([^"]*)"', re.I)
+
+
+def scrape_mcskins_net(max_pages):
+    import cloudscraper
+    scraper = cloudscraper.create_scraper(
+        browser={"browser": "chrome", "platform": "linux", "desktop": True}
+    )
+    out = []
+    seen = set()
+    for n in range(1, max_pages + 1):
+        url = NET_BASE if n == 1 else f"{NET_BASE}/page/{n}"
+        print(f"  [mcnet] page {n}/{max_pages}")
+        try:
+            r = scraper.get(url, timeout=60)
+        except Exception as e:
+            print(f"  [mcnet] request error: {e}")
+            break
+        if r.status_code != 200:
+            print(f"  [mcnet] status {r.status_code}, stopping.")
+            break
+        matches = NET_IMG_RE.findall(r.text)
+        if not matches:
+            print("  [mcnet] no cards found; stopping.")
+            break
+        new_count = 0
+        for img_path, slug, name in matches:
+            if slug in seen:
+                continue
+            seen.add(slug)
+            new_count += 1
+            out.append({
+                "source": "mcnet",
+                "name": name or slug,
+                "image_url": f"{NET_BASE}{img_path}",            # front render (character)
+                "download_url": f"{NET_BASE}/{slug}/download",    # real skin-file download
+                "downloads": None,   # not shown on the listing
+                "id": slug,
+            })
+        if new_count == 0:
+            break
+        time.sleep(1.2)
+    return out
+
+
 # --------------------------------------------------------------- MineSkin ---
 def _mineskin_hash(it):
     tex = it.get("texture") or {}
@@ -386,6 +440,8 @@ def main():
         jobs.append(("skindex", lambda: scrape_skindex(SKINDEX_PAGES)))
     if ENABLE_NAMEMC:
         jobs.append(("namemc", lambda: scrape_namemc(NAMEMC_PAGES)))
+    if ENABLE_MCNET:
+        jobs.append(("mcnet", lambda: scrape_mcskins_net(MCNET_PAGES)))
     if ENABLE_MINESKIN:
         jobs.append(("mineskin", lambda: scrape_mineskin(MINESKIN_PAGES)))
 

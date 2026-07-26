@@ -22,11 +22,13 @@ import sys
 # ---- What to collect (tune these) ----------------------------------------
 ENABLE_LABY = True
 ENABLE_SKINDEX = True
-ENABLE_MINESKIN = True
+ENABLE_NAMEMC = True
+ENABLE_MINESKIN = False    # replaced by NameMC
 
 LABY_TARGET = 2000        # approx skins from laby.net
 SKINDEX_PAGES = 40        # gallery pages (~48 skins each)
-MINESKIN_PAGES = 20       # list pages (~50 skins each)
+NAMEMC_PAGES = 20         # namemc pages
+MINESKIN_PAGES = 20       # (only used if ENABLE_MINESKIN)
 
 OUTPUT = "skins_all.json"
 SHUFFLE = True
@@ -201,6 +203,107 @@ def scrape_skindex(max_pages):
     return out
 
 
+# ----------------------------------------------------------------- NameMC ---
+# NameMC skin cards (from the DOM you shared):
+#   <div class="card"><a href="/skin/<id>">
+#       <div class="card-header">NAME</div>
+#       <div class="card-body">
+#          <img data-src="https://s.namemc.com/3d/skin/body.png?id=<id>&model=slim&...">
+#          <div class="position-absolute top-0 start-0">#RANK</div>
+#          <div class="position-absolute bottom-0 end-0">STAT</div>
+#       </div></a></div>
+# NameMC is heavily Cloudflare-protected, so we use the same headful browser.
+NMC_BASE = "https://namemc.com/minecraft-skins"
+NMC_ID_RE = re.compile(r'/skin/([0-9a-fA-F]+)')
+
+NMC_JS = """els => els.map(card => {
+  const a = card.querySelector("a[href^='/skin/']");
+  const img = card.querySelector('img');
+  const q = (sel) => { const e = card.querySelector(sel); return e ? e.textContent.trim() : ''; };
+  return {
+    href: a ? a.getAttribute('href') : '',
+    name: q('.card-header'),
+    src: img ? (img.getAttribute('data-src') || img.currentSrc || img.getAttribute('src') || '') : '',
+    rank: q('.position-absolute.top-0.start-0'),
+    stat_end: q('.position-absolute.bottom-0.end-0'),
+    stat_start: q('.position-absolute.bottom-0.start-0'),
+  };
+})"""
+
+
+def scrape_namemc(max_pages):
+    from playwright.sync_api import sync_playwright
+    out = []
+    seen = set()
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled",
+                  "--no-sandbox", "--disable-dev-shm-usage", "--start-maximized"],
+        )
+        ctx = browser.new_context(user_agent=UA,
+                                  viewport={"width": 1366, "height": 900}, locale="en-US")
+        ctx.add_init_script(STEALTH_JS)
+        page = ctx.new_page()
+        for n in range(1, max_pages + 1):
+            url = NMC_BASE if n == 1 else f"{NMC_BASE}?page={n}"
+            print(f"  [namemc] page {n}/{max_pages}")
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            except Exception as e:
+                print(f"  [namemc] nav error: {e}")
+                break
+            # wait for skin cards (i.e. Cloudflare challenge cleared)
+            cleared = False
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                if page.query_selector("a[href^='/skin/']"):
+                    cleared = True
+                    break
+                time.sleep(1)
+            if not cleared:
+                title = ""
+                try:
+                    title = page.title()
+                except Exception:
+                    pass
+                print(f"  [namemc] cards not found (title: {title!r}); skipping source.")
+                break
+
+            cards = page.eval_on_selector_all("div.card", NMC_JS)
+            if DEBUG_SAMPLES and cards:
+                print("  [namemc] SAMPLE CARD:", json.dumps(cards[0])[:400])
+            new_count = 0
+            for c in cards:
+                m = NMC_ID_RE.search(c.get("href") or "")
+                if not m:
+                    continue
+                sid = m.group(1)
+                if sid in seen:
+                    continue
+                seen.add(sid)
+                new_count += 1
+                img = c.get("src") or (
+                    f"https://s.namemc.com/3d/skin/body.png?id={sid}&model=slim&width=256&height=256")
+                # best guess for a download/usage count is the bottom-right stat;
+                # rank (#1) is kept separate.
+                downloads = c.get("stat_end") or c.get("stat_start") or None
+                out.append({
+                    "source": "namemc",
+                    "name": (c.get("name") or None),
+                    "image_url": img,
+                    "download_url": f"https://namemc.com/skin/{sid}",
+                    "downloads": downloads,
+                    "id": sid,
+                })
+            if new_count == 0:
+                print("  [namemc] no new skins; stopping.")
+                break
+            time.sleep(1.5)
+        browser.close()
+    return out
+
+
 # --------------------------------------------------------------- MineSkin ---
 def _mineskin_hash(it):
     tex = it.get("texture") or {}
@@ -281,6 +384,8 @@ def main():
         jobs.append(("laby", lambda: scrape_laby(LABY_TARGET)))
     if ENABLE_SKINDEX:
         jobs.append(("skindex", lambda: scrape_skindex(SKINDEX_PAGES)))
+    if ENABLE_NAMEMC:
+        jobs.append(("namemc", lambda: scrape_namemc(NAMEMC_PAGES)))
     if ENABLE_MINESKIN:
         jobs.append(("mineskin", lambda: scrape_mineskin(MINESKIN_PAGES)))
 

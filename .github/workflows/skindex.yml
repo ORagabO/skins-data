@@ -1,14 +1,14 @@
 name: Scrape Skindex Skins
 
 # ---------------------------------------------------------------------------
-# Upload this file to:  .github/workflows/skindex.yml   (REPLACE the old one)
-# Then open "Actions" -> "Scrape Skindex Skins" -> "Run workflow".
+# Upload to:  .github/workflows/skindex.yml   (REPLACE the old one)
+# Runs headful Chromium under Xvfb to get past Cloudflare's JS challenge.
 # ---------------------------------------------------------------------------
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 3 * * 1"     # every Monday 03:00 UTC
+    - cron: "0 3 * * 1"
 
 permissions:
   contents: write
@@ -25,15 +25,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Playwright + Chromium
+      - name: Install Playwright + Chromium + Xvfb
         run: |
           python -m pip install --upgrade pip
           pip install playwright
-          # Download the Chromium browser AND its OS dependencies.
           python -m playwright install --with-deps chromium
+          sudo apt-get update && sudo apt-get install -y xvfb
 
-      - name: Run Skindex scraper
-        run: python scraper_skindex.py
+      - name: Run Skindex scraper (headful via Xvfb)
+        run: xvfb-run -a python scraper_skindex.py
 
       - name: Commit and push results
         run: |

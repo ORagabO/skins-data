@@ -73,12 +73,15 @@ def extract_page_data(page):
 
     images = {}
     for s in srcs:
-        m = IMG_RE.search(s or "")
+        s = s or ""
+        m = IMG_RE.search(s)
         if not m:
             continue
-        clean = (s or "").split("?")[0]              # drop cache-buster query
-        # Use the MAIN skin file (/uploads/skins/...), not the preview render.
-        clean = clean.replace("/uploads/preview-skins/", "/uploads/skins/")
+        clean = s.split("?")[0]                        # drop cache-buster query
+        if clean.startswith("/"):                      # make relative src absolute
+            clean = BASE + clean
+        # Keep the /uploads/preview-skins/... path = the rendered CHARACTER skin
+        # (the /uploads/skins/... path is the flat texture and looks like a hash).
         images[m.group(1)] = clean
 
     return page_ids, images
@@ -178,7 +181,7 @@ def get_all_skins_data():
                 all_skins.append({
                     "id": sid,
                     "name": slug.replace("-", " ").strip(),
-                    "image_url": image_url,                          # main skin image source
+                    "image_url": image_url,                          # rendered character skin image
                     "download_url": f"{BASE}/skin/download/{sid}",  # raw 64x64 skin file
                 })
 

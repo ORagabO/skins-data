@@ -42,43 +42,70 @@ def render_from_hash(h):
 
 
 # ---------------------------------------------------------------- laby.net --
+# laby's JSON API returns hashes but NO names. The rendered /skins page shows
+# each skin as <img alt="<Name> Minecraft Skin" src=".../render/skin/<hash>.png">,
+# so we scrape the page to get the NAME from alt and the hash from src.
+LABY_URL = "https://laby.net/skins"
+LABY_SCROLLS = 60          # how many times to scroll to load more skins
+LABY_HASH_RE = re.compile(r'/render/skin/([0-9a-fA-F]+)\.png')
+LABY_NAME_RE = re.compile(r'\s*Minecraft Skin\s*$', re.IGNORECASE)
+
+
 def scrape_laby(target):
-    import cloudscraper
-    scraper = cloudscraper.create_scraper(
-        browser={"browser": "chrome", "platform": "linux", "desktop": True}
-    )
+    from playwright.sync_api import sync_playwright
     out = []
-    offset = 0
-    size = 36
-    while len(out) < target:
-        api = ("https://laby.net/api/v3/search/textures/skin"
-               f"?order=most_used&size={size}&offset={offset}")
+    seen = set()
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled",
+                  "--no-sandbox", "--disable-dev-shm-usage", "--start-maximized"],
+        )
+        ctx = browser.new_context(user_agent=UA,
+                                  viewport={"width": 1366, "height": 900}, locale="en-US")
+        ctx.add_init_script(STEALTH_JS)
+        page = ctx.new_page()
         try:
-            r = scraper.get(api, timeout=60)
+            page.goto(LABY_URL, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_selector("img[src*='/render/skin/']", timeout=45000)
         except Exception as e:
-            print(f"  [laby] request error: {e}")
-            break
-        if r.status_code != 200:
-            print(f"  [laby] status {r.status_code}, stopping.")
-            break
-        data = r.json()
-        lst = data if isinstance(data, list) else (
-            data.get("results") or data.get("data") or data.get("textures") or [])
-        if not lst:
-            break
-        for sk in lst:
-            h = sk.get("hash") or sk.get("image_hash") or sk.get("id")
-            if not h:
-                continue
-            out.append({
-                "source": "laby",
-                "id": h,
-                "name": sk.get("name"),
-                "image_url": render_from_hash(h),
-                "download_url": f"https://textures.minecraft.net/texture/{h}",
-            })
-        offset += size
-        time.sleep(1.5)
+            print(f"  [laby] page did not load skins: {e}")
+            browser.close()
+            return out
+
+        stagnant = 0
+        while len(out) < target and stagnant < 6:
+            items = page.eval_on_selector_all(
+                "img[src*='/render/skin/']",
+                "els => els.map(e => ({src: e.currentSrc || e.getAttribute('src') || '', "
+                "alt: e.getAttribute('alt') || ''}))",
+            )
+            before = len(out)
+            for it in items:
+                m = LABY_HASH_RE.search(it["src"] or "")
+                if not m:
+                    continue
+                h = m.group(1)
+                if h in seen:
+                    continue
+                seen.add(h)
+                name = LABY_NAME_RE.sub("", it["alt"] or "").strip() or None
+                out.append({
+                    "source": "laby",
+                    "name": name,                                       # from alt, e.g. "Cat"
+                    "image_url": f"https://laby.net/api/v3/render/skin/{h}.png?height=500&width=500",
+                    "download_url": f"https://textures.minecraft.net/texture/{h}",
+                    "downloads": None,   # laby's grid doesn't display a download count
+                    "id": h,
+                })
+            gained = len(out) - before
+            stagnant = stagnant + 1 if gained == 0 else 0
+            print(f"  [laby] loaded {len(out)} skins so far...")
+            # scroll to trigger loading more
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.mouse.wheel(0, 25000)
+            time.sleep(1.5)
+        browser.close()
     return out[:target]
 
 
@@ -163,10 +190,11 @@ def scrape_skindex(max_pages):
             for sid, slug in ids.items():
                 out.append({
                     "source": "skindex",
-                    "id": sid,
                     "name": slug.replace("-", " ").strip(),
                     "image_url": imgs.get(sid) or f"{SKX_BASE}/skin/download/{sid}",
                     "download_url": f"{SKX_BASE}/skin/download/{sid}",
+                    "downloads": None,   # shown on each skin's detail page (see note)
+                    "id": sid,
                 })
             time.sleep(1.5)
         browser.close()
@@ -222,12 +250,16 @@ def scrape_mineskin(max_pages):
             h = _mineskin_hash(it)
             if not h:
                 continue
+            views = it.get("views")
+            if views is None and isinstance(it.get("stats"), dict):
+                views = it["stats"].get("views")
             out.append({
                 "source": "mineskin",
-                "id": it.get("uuid") or h,
                 "name": it.get("name"),
                 "image_url": render_from_hash(h),
                 "download_url": f"https://textures.minecraft.net/texture/{h}",
+                "downloads": views,
+                "id": it.get("uuid") or h,
             })
         pg = data.get("pagination") or {}
         after = pg.get("next") or pg.get("after") or pg.get("cursor")

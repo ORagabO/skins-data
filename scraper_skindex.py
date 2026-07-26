@@ -46,18 +46,42 @@ window.navigator.permissions.query = (p) => (
 );
 """
 
-DETAIL_RE = re.compile(r'/skin/(\d+)/([^/"\')\s]+)/')
-PREVIEW_RE = re.compile(
-    r'(https://www\.minecraftskins\.com/uploads/preview-skins/[^\s"\')?]+?-(\d+)\.png)'
-)
+HREF_RE = re.compile(r'/skin/(\d+)/([^/?#"\']+)')
+# The skin's image lives under /uploads/skins/ (main file) or /uploads/preview-skins/
+# (render). Both filenames end with -<id>.png. Match either, keyed by id.
+IMG_RE = re.compile(r'/uploads/(?:preview-)?skins/[^\s"\']*?-(\d+)\.png')
 
 
-def parse_html(html):
+def extract_page_data(page):
+    """Read ids and the real image src straight from the rendered DOM.
+    This is robust to lazy-loading and to the exact CDN host used."""
+    hrefs = page.eval_on_selector_all(
+        "a[href*='/skin/']",
+        "els => els.map(e => e.getAttribute('href'))",
+    )
+    srcs = page.eval_on_selector_all(
+        "img",
+        "els => els.map(e => e.currentSrc || e.getAttribute('src') "
+        "|| e.getAttribute('data-src') || e.getAttribute('data-original') || '')",
+    )
+
     page_ids = {}
-    for m in DETAIL_RE.finditer(html):
-        page_ids.setdefault(m.group(1), m.group(2))
-    previews = {m.group(2): m.group(1) for m in PREVIEW_RE.finditer(html)}
-    return page_ids, previews
+    for h in hrefs:
+        m = HREF_RE.search(h or "")
+        if m:
+            page_ids.setdefault(m.group(1), m.group(2))
+
+    images = {}
+    for s in srcs:
+        m = IMG_RE.search(s or "")
+        if not m:
+            continue
+        clean = (s or "").split("?")[0]              # drop cache-buster query
+        # Use the MAIN skin file (/uploads/skins/...), not the preview render.
+        clean = clean.replace("/uploads/preview-skins/", "/uploads/skins/")
+        images[m.group(1)] = clean
+
+    return page_ids, images
 
 
 def wait_for_clearance(page):
@@ -138,8 +162,7 @@ def get_all_skins_data():
                 print("  Stopping.")
                 break
 
-            html = page.content()
-            page_ids, previews = parse_html(html)
+            page_ids, images = extract_page_data(page)
             if not page_ids:
                 if page_num == 1:
                     browser.close()
@@ -149,10 +172,13 @@ def get_all_skins_data():
                 break
 
             for sid, slug in page_ids.items():
+                # Main skin image source, with a guaranteed fallback if a given
+                # card didn't expose an <img> src.
+                image_url = images.get(sid) or f"{BASE}/skin/download/{sid}"
                 all_skins.append({
                     "id": sid,
                     "name": slug.replace("-", " ").strip(),
-                    "image_url": previews.get(sid),                 # direct .png image (was skin_url/view page)
+                    "image_url": image_url,                          # main skin image source
                     "download_url": f"{BASE}/skin/download/{sid}",  # raw 64x64 skin file
                 })
 

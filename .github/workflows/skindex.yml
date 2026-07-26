@@ -1,17 +1,15 @@
 name: Scrape Skindex Skins
 
 # ---------------------------------------------------------------------------
-# Upload this file to:  .github/workflows/skindex.yml
-# Then go to the repo's "Actions" tab, pick "Scrape Skindex Skins",
-# and click "Run workflow" to test it immediately.
+# Upload this file to:  .github/workflows/skindex.yml   (REPLACE the old one)
+# Then open "Actions" -> "Scrape Skindex Skins" -> "Run workflow".
 # ---------------------------------------------------------------------------
 
 on:
-  workflow_dispatch:        # manual "Run workflow" button (for testing)
+  workflow_dispatch:
   schedule:
-    - cron: "0 3 * * 1"     # also runs automatically every Monday at 03:00 UTC
+    - cron: "0 3 * * 1"     # every Monday 03:00 UTC
 
-# Allow the job to push the updated JSON back to the repo.
 permissions:
   contents: write
 
@@ -27,10 +25,12 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install Playwright + Chromium
         run: |
           python -m pip install --upgrade pip
-          pip install cloudscraper
+          pip install playwright
+          # Download the Chromium browser AND its OS dependencies.
+          python -m playwright install --with-deps chromium
 
       - name: Run Skindex scraper
         run: python scraper_skindex.py
@@ -39,6 +39,10 @@ jobs:
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          if [ ! -s skindex_data.json ] || [ "$(tr -d '[:space:]' < skindex_data.json)" = "[]" ]; then
+            echo "skindex_data.json is empty; nothing to commit."
+            exit 0
+          fi
           git add skindex_data.json
           if git diff --staged --quiet; then
             echo "No changes to commit."

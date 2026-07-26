@@ -42,70 +42,70 @@ def render_from_hash(h):
 
 
 # ---------------------------------------------------------------- laby.net --
-# laby's JSON API returns hashes but NO names. The rendered /skins page shows
-# each skin as <img alt="<Name> Minecraft Skin" src=".../render/skin/<hash>.png">,
-# so we scrape the page to get the NAME from alt and the hash from src.
-LABY_URL = "https://laby.net/skins"
-LABY_SCROLLS = 60          # how many times to scroll to load more skins
-LABY_HASH_RE = re.compile(r'/render/skin/([0-9a-fA-F]+)\.png')
-LABY_NAME_RE = re.compile(r'\s*Minecraft Skin\s*$', re.IGNORECASE)
+# Use laby's JSON API (reliable + fast + paginated). It returns a texture hash
+# per skin; name/usage may be under keys we can't see from here, so we try
+# several and print ONE raw item (DEBUG_SAMPLES) to confirm the real fields.
+DEBUG_SAMPLES = True   # set False once field names are confirmed
+
+
+def _first(d, keys):
+    for k in keys:
+        v = d.get(k)
+        if v not in (None, "", []):
+            return v
+    return None
 
 
 def scrape_laby(target):
-    from playwright.sync_api import sync_playwright
+    import cloudscraper
+    scraper = cloudscraper.create_scraper(
+        browser={"browser": "chrome", "platform": "linux", "desktop": True}
+    )
     out = []
     seen = set()
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled",
-                  "--no-sandbox", "--disable-dev-shm-usage", "--start-maximized"],
-        )
-        ctx = browser.new_context(user_agent=UA,
-                                  viewport={"width": 1366, "height": 900}, locale="en-US")
-        ctx.add_init_script(STEALTH_JS)
-        page = ctx.new_page()
+    offset = 0
+    size = 36
+    dumped = False
+    while len(out) < target:
+        api = ("https://laby.net/api/v3/search/textures/skin"
+               f"?order=most_used&size={size}&offset={offset}")
         try:
-            page.goto(LABY_URL, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_selector("img[src*='/render/skin/']", timeout=45000)
+            r = scraper.get(api, timeout=60)
         except Exception as e:
-            print(f"  [laby] page did not load skins: {e}")
-            browser.close()
-            return out
-
-        stagnant = 0
-        while len(out) < target and stagnant < 6:
-            items = page.eval_on_selector_all(
-                "img[src*='/render/skin/']",
-                "els => els.map(e => ({src: e.currentSrc || e.getAttribute('src') || '', "
-                "alt: e.getAttribute('alt') || ''}))",
-            )
-            before = len(out)
-            for it in items:
-                m = LABY_HASH_RE.search(it["src"] or "")
-                if not m:
-                    continue
-                h = m.group(1)
-                if h in seen:
-                    continue
-                seen.add(h)
-                name = LABY_NAME_RE.sub("", it["alt"] or "").strip() or None
-                out.append({
-                    "source": "laby",
-                    "name": name,                                       # from alt, e.g. "Cat"
-                    "image_url": f"https://laby.net/api/v3/render/skin/{h}.png?height=500&width=500",
-                    "download_url": f"https://textures.minecraft.net/texture/{h}",
-                    "downloads": None,   # laby's grid doesn't display a download count
-                    "id": h,
-                })
-            gained = len(out) - before
-            stagnant = stagnant + 1 if gained == 0 else 0
-            print(f"  [laby] loaded {len(out)} skins so far...")
-            # scroll to trigger loading more
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.mouse.wheel(0, 25000)
-            time.sleep(1.5)
-        browser.close()
+            print(f"  [laby] request error: {e}")
+            break
+        if r.status_code != 200:
+            print(f"  [laby] status {r.status_code}, stopping.")
+            break
+        data = r.json()
+        lst = data if isinstance(data, list) else _first(
+            data, ["results", "data", "textures", "skins", "hits"]) or []
+        if not lst:
+            break
+        for sk in lst:
+            if DEBUG_SAMPLES and not dumped:
+                print("  [laby] SAMPLE ITEM KEYS:", list(sk.keys()))
+                print("  [laby] SAMPLE ITEM:", json.dumps(sk)[:1000])
+                dumped = True
+            h = _first(sk, ["hash", "image_hash", "id", "texture_id", "texture"])
+            if isinstance(h, dict):
+                h = _first(h, ["hash", "id"])
+            if not h or h in seen:
+                continue
+            seen.add(h)
+            name = _first(sk, ["name", "title", "skin_name", "display_name", "label"])
+            downloads = _first(sk, ["useCount", "use_count", "usages", "usage",
+                                    "used", "users", "count", "uses", "downloads"])
+            out.append({
+                "source": "laby",
+                "name": name,
+                "image_url": f"https://laby.net/api/v3/render/skin/{h}.png?height=500&width=500",
+                "download_url": f"https://textures.minecraft.net/texture/{h}",
+                "downloads": downloads,
+                "id": h,
+            })
+        offset += size
+        time.sleep(1.2)
     return out[:target]
 
 
@@ -237,11 +237,16 @@ def scrape_mineskin(max_pages):
             print(f"  [mineskin] request error: {e}")
             break
         if r.status_code != 200:
-            print(f"  [mineskin] status {r.status_code}, stopping.")
+            print(f"  [mineskin] status {r.status_code}: {r.text[:200]}")
             break
         data = r.json()
+        if DEBUG_SAMPLES:
+            print("  [mineskin] TOP-LEVEL KEYS:", list(data.keys())
+                  if isinstance(data, dict) else type(data).__name__)
         items = (data.get("skins") or data.get("data") or data.get("results")
                  or (data if isinstance(data, list) else []))
+        if DEBUG_SAMPLES and items:
+            print("  [mineskin] SAMPLE ITEM:", json.dumps(items[0])[:600])
         if not items:
             break
         for it in items:

@@ -1,205 +1,290 @@
 import json
 import time
 import re
+import random
 import sys
-from playwright.sync_api import sync_playwright
 
-# --------------------------------------------------------------------------
-# The Skindex (minecraftskins.com) — FULL-BODY skins, behind Cloudflare's
-# "Just a moment..." JS challenge.
+# ==========================================================================
+# Multi-source Minecraft skin collector.
 #
-# A plain headless browser gets DETECTED and the challenge never clears. This
-# version fights that with:
-#   1. Headful Chromium (headless=False) run under Xvfb on the CI runner.
-#   2. Stealth init script that removes automation signals (navigator.webdriver,
-#      etc.) BEFORE any page script runs.
-#   3. A wait loop that gives the challenge time and reloads if it's stuck.
+# Sources:
+#   1. laby.net        - JSON API (cloudscraper).           Character render + Mojang texture.
+#   2. The Skindex     - HTML gallery (headful Playwright). Character render + skin file.
+#   3. MineSkin        - JSON API /v2/skins (requests).     Character render + Mojang texture.
 #
-# The workflow MUST run this via `xvfb-run` (see skindex.yml).
-#
-# Honest note: if Cloudflare escalates the Actions IP to an *interactive*
-# Turnstile, no headless-runner trick passes it. In that case run this same
-# file locally (home IP clears it instantly) or use the Hugging Face dataset.
-# --------------------------------------------------------------------------
+# Every source returns entries in ONE common shape:
+#   {"source", "id", "name", "image_url", "download_url"}
+# so they can be mixed together. Each source runs inside try/except: if one
+# fails (e.g. Skindex is Cloudflare-blocked on a CI IP), the others still run.
+# At the end everything is deduplicated and SHUFFLED into a single file.
+# ==========================================================================
 
-BASE = "https://www.minecraftskins.com"
-BASE_PATH = "latest"
-MAX_PAGES = 250               # lower to 5 for a quick test
-PAGE_DELAY = 1.5
-CHALLENGE_WAIT = 30           # seconds to let the challenge clear on a page
-NAV_TIMEOUT = 60000           # ms
+# ---- What to collect (tune these) ----------------------------------------
+ENABLE_LABY = True
+ENABLE_SKINDEX = True
+ENABLE_MINESKIN = True
 
-USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-              "AppleWebKit/537.36 (KHTML, like Gecko) "
-              "Chrome/120.0.0.0 Safari/537.36")
+LABY_TARGET = 2000        # approx skins from laby.net
+SKINDEX_PAGES = 40        # gallery pages (~48 skins each)
+MINESKIN_PAGES = 20       # list pages (~50 skins each)
 
+OUTPUT = "skins_all.json"
+SHUFFLE = True
+MAX_TOTAL = None          # e.g. 5000 to cap the final list; None = keep all
+
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+
+def render_from_hash(h):
+    """A viewable CHARACTER render for a Mojang texture hash (via laby's renderer)."""
+    return f"https://laby.net/api/v3/render/skin/{h}.png?height=500&width=500"
+
+
+# ---------------------------------------------------------------- laby.net --
+def scrape_laby(target):
+    import cloudscraper
+    scraper = cloudscraper.create_scraper(
+        browser={"browser": "chrome", "platform": "linux", "desktop": True}
+    )
+    out = []
+    offset = 0
+    size = 36
+    while len(out) < target:
+        api = ("https://laby.net/api/v3/search/textures/skin"
+               f"?order=most_used&size={size}&offset={offset}")
+        try:
+            r = scraper.get(api, timeout=60)
+        except Exception as e:
+            print(f"  [laby] request error: {e}")
+            break
+        if r.status_code != 200:
+            print(f"  [laby] status {r.status_code}, stopping.")
+            break
+        data = r.json()
+        lst = data if isinstance(data, list) else (
+            data.get("results") or data.get("data") or data.get("textures") or [])
+        if not lst:
+            break
+        for sk in lst:
+            h = sk.get("hash") or sk.get("image_hash") or sk.get("id")
+            if not h:
+                continue
+            out.append({
+                "source": "laby",
+                "id": h,
+                "name": sk.get("name"),
+                "image_url": render_from_hash(h),
+                "download_url": f"https://textures.minecraft.net/texture/{h}",
+            })
+        offset += size
+        time.sleep(1.5)
+    return out[:target]
+
+
+# ---------------------------------------------------------------- Skindex ---
+SKX_BASE = "https://www.minecraftskins.com"
+SKX_PATH = "latest"
+HREF_RE = re.compile(r'/skin/(\d+)/([^/?#"\']+)')
+IMG_RE = re.compile(r'/uploads/(?:preview-)?skins/[^\s"\']*?-(\d+)\.png')
 STEALTH_JS = """
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
+Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
 window.chrome = { runtime: {} };
-const origQuery = window.navigator.permissions.query;
-window.navigator.permissions.query = (p) => (
-  p && p.name === 'notifications'
-    ? Promise.resolve({ state: Notification.permission })
-    : origQuery(p)
-);
 """
 
-HREF_RE = re.compile(r'/skin/(\d+)/([^/?#"\']+)')
-# The skin's image lives under /uploads/skins/ (main file) or /uploads/preview-skins/
-# (render). Both filenames end with -<id>.png. Match either, keyed by id.
-IMG_RE = re.compile(r'/uploads/(?:preview-)?skins/[^\s"\']*?-(\d+)\.png')
 
-
-def extract_page_data(page):
-    """Read ids and the real image src straight from the rendered DOM.
-    This is robust to lazy-loading and to the exact CDN host used."""
+def _skx_extract(page):
     hrefs = page.eval_on_selector_all(
-        "a[href*='/skin/']",
-        "els => els.map(e => e.getAttribute('href'))",
-    )
+        "a[href*='/skin/']", "els => els.map(e => e.getAttribute('href'))")
     srcs = page.eval_on_selector_all(
-        "img",
-        "els => els.map(e => e.currentSrc || e.getAttribute('src') "
-        "|| e.getAttribute('data-src') || e.getAttribute('data-original') || '')",
-    )
-
-    page_ids = {}
+        "img", "els => els.map(e => e.currentSrc || e.getAttribute('src') "
+               "|| e.getAttribute('data-src') || e.getAttribute('data-original') || '')")
+    ids = {}
     for h in hrefs:
         m = HREF_RE.search(h or "")
         if m:
-            page_ids.setdefault(m.group(1), m.group(2))
-
-    images = {}
+            ids.setdefault(m.group(1), m.group(2))
+    imgs = {}
     for s in srcs:
         s = s or ""
         m = IMG_RE.search(s)
         if not m:
             continue
-        clean = s.split("?")[0]                        # drop cache-buster query
-        if clean.startswith("/"):                      # make relative src absolute
-            clean = BASE + clean
-        # Keep the /uploads/preview-skins/... path = the rendered CHARACTER skin
-        # (the /uploads/skins/... path is the flat texture and looks like a hash).
-        images[m.group(1)] = clean
-
-    return page_ids, images
+        clean = s.split("?")[0]
+        if clean.startswith("/"):
+            clean = SKX_BASE + clean
+        imgs[m.group(1)] = clean   # keep /uploads/preview-skins/... = character render
+    return ids, imgs
 
 
-def wait_for_clearance(page):
-    """Return True once real skin links appear; reload if stuck on challenge."""
-    deadline = time.time() + CHALLENGE_WAIT
-    reloaded = False
-    while time.time() < deadline:
-        try:
-            if page.query_selector("a[href*='/skin/']"):
-                return True
-        except Exception:
-            pass
-        title = ""
-        try:
-            title = page.title()
-        except Exception:
-            pass
-        if "just a moment" in title.lower() or "attention" in title.lower():
-            # Give it time; try one reload halfway through.
-            if not reloaded and time.time() > deadline - CHALLENGE_WAIT / 2:
-                try:
-                    page.reload(wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
-                except Exception:
-                    pass
-                reloaded = True
-        time.sleep(1)
-    return bool(page.query_selector("a[href*='/skin/']"))
-
-
-def get_all_skins_data():
-    all_skins = []
-
+def scrape_skindex(max_pages):
+    from playwright.sync_api import sync_playwright
+    out = []
     with sync_playwright() as p:
         browser = p.chromium.launch(
-            headless=False,  # headful under Xvfb — key to passing detection
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--start-maximized",
-            ],
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled",
+                  "--no-sandbox", "--disable-dev-shm-usage", "--start-maximized"],
         )
-        context = browser.new_context(
-            user_agent=USER_AGENT,
-            viewport={"width": 1366, "height": 768},
-            locale="en-US",
-        )
-        context.add_init_script(STEALTH_JS)
-        page = context.new_page()
-
-        for page_num in range(1, MAX_PAGES + 1):
-            url = f"{BASE}/{BASE_PATH}/{page_num}/" if BASE_PATH else f"{BASE}/{page_num}/"
-            print(f"Fetching page {page_num}/{MAX_PAGES}: {url}")
-
+        ctx = browser.new_context(user_agent=UA,
+                                  viewport={"width": 1366, "height": 768}, locale="en-US")
+        ctx.add_init_script(STEALTH_JS)
+        page = ctx.new_page()
+        for n in range(1, max_pages + 1):
+            url = f"{SKX_BASE}/{SKX_PATH}/{n}/"
+            print(f"  [skindex] page {n}/{max_pages}")
             try:
-                page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
             except Exception as e:
-                print(f"  Navigation error: {e}")
-                if page_num == 1:
-                    browser.close()
-                    sys.exit(1)
+                print(f"  [skindex] nav error: {e}")
                 break
-
-            if not wait_for_clearance(page):
+            # wait up to ~30s for the Cloudflare challenge to clear
+            cleared = False
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                if page.query_selector("a[href*='/skin/']"):
+                    cleared = True
+                    break
+                time.sleep(1)
+            if not cleared:
                 title = ""
                 try:
                     title = page.title()
                 except Exception:
                     pass
-                print(f"  Challenge did not clear (title: {title!r}).")
-                if page_num == 1:
-                    print("\nERROR: Cloudflare challenge never cleared on the first "
-                          "page. Not writing an empty file.\n"
-                          "This means the Actions IP is being blocked. Run locally "
-                          "or use the Hugging Face dataset instead.")
-                    browser.close()
-                    sys.exit(1)
-                print("  Stopping.")
+                print(f"  [skindex] challenge not cleared (title: {title!r}); "
+                      "skipping this source.")
                 break
-
-            page_ids, images = extract_page_data(page)
-            if not page_ids:
-                if page_num == 1:
-                    browser.close()
-                    print("\nERROR: First page returned no skins after challenge.")
-                    sys.exit(1)
-                print("  No skins found. Reached the end!")
+            ids, imgs = _skx_extract(page)
+            if not ids:
                 break
-
-            for sid, slug in page_ids.items():
-                # Main skin image source, with a guaranteed fallback if a given
-                # card didn't expose an <img> src.
-                image_url = images.get(sid) or f"{BASE}/skin/download/{sid}"
-                all_skins.append({
+            for sid, slug in ids.items():
+                out.append({
+                    "source": "skindex",
                     "id": sid,
                     "name": slug.replace("-", " ").strip(),
-                    "image_url": image_url,                          # rendered character skin image
-                    "download_url": f"{BASE}/skin/download/{sid}",  # raw 64x64 skin file
+                    "image_url": imgs.get(sid) or f"{SKX_BASE}/skin/download/{sid}",
+                    "download_url": f"{SKX_BASE}/skin/download/{sid}",
                 })
-
-            print(f"  Collected {len(page_ids)} skins (running total: {len(all_skins)}).")
-            time.sleep(PAGE_DELAY)
-
+            time.sleep(1.5)
         browser.close()
+    return out
 
-    unique_skins = list({s["id"]: s for s in all_skins}.values())
-    if len(unique_skins) == 0:
-        print("\nERROR: Collected 0 skins. Aborting without writing.")
+
+# --------------------------------------------------------------- MineSkin ---
+def _mineskin_hash(it):
+    tex = it.get("texture") or {}
+    if isinstance(tex, dict):
+        # direct hash field (a bare texture hash, no slashes)
+        h = tex.get("hash")
+        if isinstance(h, str) and h and "/" not in h:
+            return h
+        # url may be a string or a dict of urls
+        url = tex.get("url")
+        if isinstance(url, str) and "texture/" in url:
+            return url.rsplit("/", 1)[-1]
+        if isinstance(url, dict):
+            for u in url.values():
+                if isinstance(u, str) and "texture/" in u:
+                    return u.rsplit("/", 1)[-1]
+    h = it.get("hash")
+    return h if isinstance(h, str) and h else None
+
+
+def scrape_mineskin(max_pages):
+    import requests
+    s = requests.Session()
+    s.headers.update({"User-Agent": UA})
+    out = []
+    after = None
+    for _ in range(max_pages):
+        params = {"size": 50}
+        if after:
+            params["after"] = after
+        try:
+            r = s.get("https://api.mineskin.org/v2/skins", params=params, timeout=60)
+        except Exception as e:
+            print(f"  [mineskin] request error: {e}")
+            break
+        if r.status_code != 200:
+            print(f"  [mineskin] status {r.status_code}, stopping.")
+            break
+        data = r.json()
+        items = (data.get("skins") or data.get("data") or data.get("results")
+                 or (data if isinstance(data, list) else []))
+        if not items:
+            break
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            h = _mineskin_hash(it)
+            if not h:
+                continue
+            out.append({
+                "source": "mineskin",
+                "id": it.get("uuid") or h,
+                "name": it.get("name"),
+                "image_url": render_from_hash(h),
+                "download_url": f"https://textures.minecraft.net/texture/{h}",
+            })
+        pg = data.get("pagination") or {}
+        after = pg.get("next") or pg.get("after") or pg.get("cursor")
+        if not after:
+            break
+        time.sleep(1.5)
+    return out
+
+
+# -------------------------------------------------------------------- main --
+def main():
+    jobs = []
+    if ENABLE_LABY:
+        jobs.append(("laby", lambda: scrape_laby(LABY_TARGET)))
+    if ENABLE_SKINDEX:
+        jobs.append(("skindex", lambda: scrape_skindex(SKINDEX_PAGES)))
+    if ENABLE_MINESKIN:
+        jobs.append(("mineskin", lambda: scrape_mineskin(MINESKIN_PAGES)))
+
+    all_skins = []
+    for name, fn in jobs:
+        print(f"=== Source: {name} ===")
+        try:
+            got = fn()
+            print(f"[{name}] collected {len(got)} skins.")
+            all_skins.extend(got)
+        except Exception as e:
+            print(f"[{name}] FAILED, skipping: {e}")
+
+    # Deduplicate by (source, id).
+    seen = set()
+    unique = []
+    for sk in all_skins:
+        key = (sk["source"], sk["id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(sk)
+
+    if SHUFFLE:
+        random.shuffle(unique)
+    if MAX_TOTAL:
+        unique = unique[:MAX_TOTAL]
+
+    if not unique:
+        print("\nERROR: no skins collected from any source. Not writing a file.")
         sys.exit(1)
 
-    print(f"\nFinished! Collected {len(unique_skins)} unique full-body skins.")
-    with open("skindex_data.json", "w") as f:
-        json.dump(unique_skins, f, indent=4)
-    print("Saved to skindex_data.json.")
+    counts = {}
+    for sk in unique:
+        counts[sk["source"]] = counts.get(sk["source"], 0) + 1
+    print(f"\nTotal unique: {len(unique)}  breakdown: {counts}")
+
+    with open(OUTPUT, "w") as f:
+        json.dump(unique, f, indent=4)
+    print(f"Saved shuffled results to {OUTPUT}.")
 
 
 if __name__ == "__main__":
-    get_all_skins_data()
+    main()

@@ -331,19 +331,25 @@ def scrape_mcskins_net(max_pages, known_ids, incremental):
 
 # -------------------------------------------------------------------- main --
 def load_existing(path):
+    abspath = os.path.abspath(path)
     if os.path.exists(path):
         try:
             with open(path) as f:
                 data = json.load(f)
             if isinstance(data, list):
+                print(f"Loaded {len(data)} existing skins from {abspath}")
                 return data
+            print(f"WARNING: {abspath} is not a list; treating as first run.")
         except Exception as e:
-            print(f"WARNING: couldn't read {path} ({e}); treating as first run.")
+            print(f"WARNING: couldn't read {abspath} ({e}); treating as first run.")
+    else:
+        print(f"No existing file at {abspath} -> FIRST RUN.")
     return []
 
 
 def main():
     existing = load_existing(OUTPUT)
+    prev_count = len(existing)
     first_run = len(existing) == 0
     print(f"Mode: {'FIRST RUN (backfill)' if first_run else 'INCREMENTAL (add new only)'}"
           f" | existing entries: {len(existing)}")
@@ -382,12 +388,22 @@ def main():
     # Merge: keep everything already in the file, append only genuinely new skins.
     added = 0
     for sk in scraped:
-        key = (sk["source"], sk["id"])
+        key = (sk.get("source"), sk.get("id"))
         if key in existing_keys:
             continue
         existing_keys.add(key)
         existing.append(sk)
         added += 1
+
+    # Final safety dedupe of the WHOLE list by (source, id), keeping first seen.
+    deduped, seen_keys = [], set()
+    for sk in existing:
+        key = (sk.get("source"), sk.get("id"))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(sk)
+    existing = deduped
 
     if first_run and MAX_TOTAL_FIRST_RUN:
         existing = existing[:MAX_TOTAL_FIRST_RUN]
@@ -396,6 +412,14 @@ def main():
 
     if not existing:
         print("\nERROR: nothing collected and no existing data. Not writing.")
+        sys.exit(1)
+
+    # SAFETY GUARD: on an incremental run, never write fewer skins than we loaded.
+    # If that happens the existing file wasn't read correctly, so we abort rather
+    # than overwrite/replace your data.
+    if not first_run and len(existing) < prev_count:
+        print(f"\nERROR: merged total ({len(existing)}) is smaller than existing "
+              f"({prev_count}). Aborting to avoid replacing your data.")
         sys.exit(1)
 
     by_source = defaultdict(int)

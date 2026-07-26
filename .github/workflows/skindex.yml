@@ -1,14 +1,14 @@
-name: Scrape Skindex Skins
+name: Scrape All Skin Sources
 
 # ---------------------------------------------------------------------------
-# Upload to:  .github/workflows/skindex.yml   (REPLACE the old one)
-# Runs headful Chromium under Xvfb to get past Cloudflare's JS challenge.
+# Upload to:  .github/workflows/scrape_all.yml
+# Collects from laby.net + Skindex + MineSkin, shuffles, commits skins_all.json.
 # ---------------------------------------------------------------------------
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 3 * * 1"
+    - cron: "0 3 * * 1"     # every Monday 03:00 UTC
 
 permissions:
   contents: write
@@ -25,28 +25,42 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Playwright + Chromium + Xvfb
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install playwright
+          pip install cloudscraper requests playwright
           python -m playwright install --with-deps chromium
           sudo apt-get update && sudo apt-get install -y xvfb
 
-      - name: Run Skindex scraper (headful via Xvfb)
-        run: xvfb-run -a python scraper_skindex.py
+      - name: Run multi-source scraper (headful via Xvfb)
+        run: xvfb-run -a python scraper_all.py
 
       - name: Commit and push results
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          if [ ! -s skindex_data.json ] || [ "$(tr -d '[:space:]' < skindex_data.json)" = "[]" ]; then
-            echo "skindex_data.json is empty; nothing to commit."
+
+          if [ ! -s skins_all.json ] || [ "$(tr -d '[:space:]' < skins_all.json)" = "[]" ]; then
+            echo "skins_all.json is empty; nothing to commit."
             exit 0
           fi
-          git add skindex_data.json
+
+          git add skins_all.json
           if git diff --staged --quiet; then
             echo "No changes to commit."
-          else
-            git commit -m "Update skindex_data.json ($(date -u +'%Y-%m-%d %H:%M UTC'))"
-            git push
+            exit 0
           fi
+          git commit -m "Update skins_all.json ($(date -u +'%Y-%m-%d %H:%M UTC'))"
+
+          branch="${GITHUB_REF_NAME:-main}"
+          for attempt in 1 2 3 4 5; do
+            if git push origin "HEAD:${branch}"; then
+              echo "Pushed successfully."
+              exit 0
+            fi
+            echo "Push rejected; syncing with remote (attempt ${attempt})..."
+            git pull --rebase --autostash -X theirs origin "${branch}" || true
+            sleep $((attempt * 3))
+          done
+          echo "ERROR: could not push after several attempts."
+          exit 1

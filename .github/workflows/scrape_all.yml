@@ -2,7 +2,8 @@ name: Scrape All Skin Sources
 
 # ---------------------------------------------------------------------------
 # Upload to:  .github/workflows/scrape_all.yml
-# Collects from laby.net + Skindex + MineSkin, shuffles, commits skins_all.json.
+# Collects from laby.net + Skindex + NameMC + minecraftskins.net,
+# commits skins_all.json, then refreshes the jsDelivr CDN cache.
 # ---------------------------------------------------------------------------
 
 on:
@@ -56,11 +57,22 @@ jobs:
           for attempt in 1 2 3 4 5; do
             if git push origin "HEAD:${branch}"; then
               echo "Pushed successfully."
-              exit 0
+              break
             fi
             echo "Push rejected; syncing with remote (attempt ${attempt})..."
             git pull --rebase --autostash -X theirs origin "${branch}" || true
             sleep $((attempt * 3))
+            if [ "$attempt" -eq 5 ]; then
+              echo "ERROR: could not push after several attempts."
+              exit 1
+            fi
           done
-          echo "ERROR: could not push after several attempts."
-          exit 1
+
+      - name: Refresh jsDelivr CDN cache
+        run: |
+          echo "Purging jsDelivr cache so the CDN serves the latest skins_all.json..."
+          curl --silent --show-error --location \
+            "https://purge.jsdelivr.net/gh/ORagabO/skins-data@main/skins_all.json" \
+            || echo "Purge request failed (CDN will refresh on its own within a few days)."
+          echo ""
+          echo "CDN URL: https://cdn.jsdelivr.net/gh/ORagabO/skins-data@main/skins_all.json"

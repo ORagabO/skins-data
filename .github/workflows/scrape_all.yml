@@ -9,7 +9,7 @@ name: Scrape All Skin Sources
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 3 * * 1"     # every Monday 03:00 UTC
+    - cron: "0 12 * * *"     
 
 permissions:
   contents: write

@@ -57,10 +57,13 @@ window.chrome = { runtime: {} };
 """
 
 # -------------------------------------------------------------- TLauncher ---
-TL_BASE = "https://tlauncher.org/en/catalog/skins/nickname/"
+# -------------------------------------------------------------- TLauncher ---
+TL_BASE = "https://tlauncher.org/en/catalog/skins/"
 
 def scrape_tlauncher(max_pages, known_ids, incremental):
     import cloudscraper
+    from bs4 import BeautifulSoup
+    
     scraper = cloudscraper.create_scraper(
         browser={"browser": "chrome", "platform": "linux", "desktop": True})
     out, seen = [], set()
@@ -68,7 +71,7 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
     
     for n in range(1, max_pages + 1):
         url = TL_BASE if n == 1 else f"{TL_BASE}page/{n}/"
-        print(f"  [tlauncher] page {n}/{max_pages}")
+        print(f"  [tlauncher] page {n}/{max_pages} -> {url}")
         
         try:
             r = scraper.get(url, timeout=60)
@@ -80,25 +83,23 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
             
         soup = BeautifulSoup(r.text, "html.parser")
         
-        skin_cards = soup.find_all("div", class_=lambda c: c and "skin" in c.lower())
-        if not skin_cards:
-            skin_cards = soup.find_all("a", href=lambda h: h and "skin" in h.lower())
-            
+        # Find ANY skin image on the page instead of relying on specific div classes
+        images = soup.find_all("img", src=re.compile(r'\.(png|webp)', re.I))
+        
         page_new = 0
         found_any = False
         
-        for card in skin_cards:
-            img = card.find("img")
-            if not img:
+        for img in images:
+            src = img.get("src") or img.get("data-src") or ""
+            
+            # Skip UI elements, logos, and generic website icons
+            if "logo" in src.lower() or "icon" in src.lower() or "avatar" in src.lower():
                 continue
                 
-            src = img.get("src") or img.get("data-src") or ""
             name = img.get("alt") or img.get("title") or "TLauncher Skin"
             
-            a_tag = card if card.name == "a" else card.find("a", href=lambda h: h and "download" in h.lower())
-            href = a_tag.get("href") if a_tag else ""
-            
-            m = re.search(r'([0-9a-zA-Z_-]+)\.png', src)
+            # Extract a unique ID/hash from the image filename
+            m = re.search(r'([^/]+)\.(png|webp)', src, re.I)
             sid = m.group(1) if m else None
             
             if not sid or sid in seen:
@@ -111,7 +112,12 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
                 page_new += 1
                 
             clean_src = src if src.startswith("http") else f"https://tlauncher.org{src}"
+            
+            # Find the closest download link attached to this image, fallback to image source
+            parent_a = img.find_parent("a", href=lambda h: h and "download" in h.lower())
+            href = parent_a.get("href") if parent_a else ""
             dl_url = href if href.startswith("http") else f"https://tlauncher.org{href}"
+            
             if not href:
                 dl_url = clean_src 
                 

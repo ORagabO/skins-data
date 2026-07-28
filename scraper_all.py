@@ -5,37 +5,36 @@ import re
 import random
 import sys
 from collections import defaultdict
+from bs4 import BeautifulSoup
 
 # ==========================================================================
 # Multi-source Minecraft skin collector with INITIAL BACKFILL + INCREMENTAL.
 #
-#   * First run  (skins_all.json missing/empty): scrape a large batch (~50k).
+#   * First run  (skins_all.json missing/empty): scrape a large batch.
 #   * Later runs (skins_all.json exists):        only ADD newly-added skins.
 #
-# On incremental runs each source walks from the top of its "newest" feed and
-# stops as soon as it hits a run of skins already in the file, so updates are
-# fast. Everything is merged into skins_all.json (existing entries kept), then
-# optionally shuffled.
-#
-# Sources: laby.net (API), The Skindex (browser), NameMC (browser),
-#          minecraftskins.net (HTML). Common shape per entry:
+# Sources: TLauncher, Xyrios, The Skindex, NameMC, minecraftskins.net
+# Common shape per entry:
 #   {"source","name","image_url","download_url","downloads","id"}
 # ==========================================================================
 
 # ---- toggles -------------------------------------------------------------
-ENABLE_LABY = True
+ENABLE_TLAUNCHER = True
+ENABLE_XYRIOS = True
 ENABLE_SKINDEX = True
 ENABLE_NAMEMC = True
 ENABLE_MCNET = True
 
 # ---- INITIAL run depths (aim ~50k total; tune to taste) ------------------
-INIT_LABY = 40000     # laby API paginates deep; the bulk of the 50k
-INIT_SKINDEX = 200    # ~48/page  -> ~9.6k   (browser; may be blocked)
-INIT_NAMEMC = 200     # namemc pages         (browser; may be blocked)
-INIT_MCNET = 25       # ~12/page  -> ~300    (all main pages)
+INIT_TLAUNCHER = 500  
+INIT_XYRIOS = 200
+INIT_SKINDEX = 200    
+INIT_NAMEMC = 200     
+INIT_MCNET = 25       
 
 # ---- INCREMENTAL run depths (small; early-stop ends them sooner) ---------
-UPD_LABY = 1500
+UPD_TLAUNCHER = 25
+UPD_XYRIOS = 25
 UPD_SKINDEX = 25
 UPD_NAMEMC = 25
 UPD_MCNET = 8
@@ -43,9 +42,9 @@ UPD_MCNET = 8
 STOP_AFTER_KNOWN_PAGES = 2   # incremental: stop a source after N all-known pages
 
 OUTPUT = "skins_all.json"
-SHUFFLE = True               # shuffle the whole file after merging
-MAX_TOTAL_FIRST_RUN = None   # e.g. 50000 to hard-cap the first run; None = no cap
-DEBUG_SAMPLES = False        # set True to print one raw item per source
+SHUFFLE = True               
+MAX_TOTAL_FIRST_RUN = None   
+DEBUG_SAMPLES = False        
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -57,148 +56,214 @@ Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
 window.chrome = { runtime: {} };
 """
 
+# -------------------------------------------------------------- TLauncher ---
+TL_BASE = "https://tlauncher.org/en/catalog/skins/nickname/"
 
-def _first(d, keys):
-    for k in keys:
-        v = d.get(k)
-        if v not in (None, "", []):
-            return v
-    return None
-
-
-def render_from_hash(h):
-    return f"https://laby.net/api/v3/render/skin/{h}.png?height=500&width=500"
-
-
-# ---------------------------------------------------------------- laby.net --
-def clean_laby_name(raw_name, skin_hash):
-    if not raw_name:
-        return "Minecraft Skin"
-    
-    # Remove weird file extensions if the API returns them
-    name = raw_name.replace(".png", "").replace(".jpg", "")
-    
-    # Replace underscores and hyphens with spaces
-    name = name.replace("_", " ").replace("-", " ")
-    
-    # Remove raw hash strings if the database accidentally used the hash as the name
-    if skin_hash and skin_hash in name:
-        name = name.replace(skin_hash, "").strip()
-        
-    # Title case the name (e.g., "dark boy" -> "Dark Boy")
-    name = name.title().strip()
-    
-    # Fallback if the name ended up empty after cleaning
-    if not name or len(name) < 2:
-        return "Minecraft Skin"
-        
-    return name
-
-def scrape_laby(target, known_ids, incremental):
+def scrape_tlauncher(max_pages, known_ids, incremental):
     import cloudscraper
     scraper = cloudscraper.create_scraper(
         browser={"browser": "chrome", "platform": "linux", "desktop": True})
     out, seen = [], set()
-    offset, size, known_streak, dumped = 0, 36, 0, False
+    known_streak = 0
     
-    while len(out) < target:
-        api = ("https://laby.net/api/v3/search/textures/skin"
-               f"?order=most_used&size={size}&offset={offset}")
+    for n in range(1, max_pages + 1):
+        url = TL_BASE if n == 1 else f"{TL_BASE}page/{n}/"
+        print(f"  [tlauncher] page {n}/{max_pages}")
+        
         try:
-            r = scraper.get(api, timeout=60)
+            r = scraper.get(url, timeout=60)
         except Exception as e:
-            print(f"  [laby] request error: {e}"); break
+            print(f"  [tlauncher] request error: {e}"); break
             
         if r.status_code != 200:
-            print(f"  [laby] status {r.status_code}, stopping."); break
+            print(f"  [tlauncher] status {r.status_code}, stopping."); break
             
-        data = r.json()
-        lst = data if isinstance(data, list) else _first(
-            data, ["results", "data", "textures", "skins", "hits"]) or []
-            
-        if not lst:
-            break
+        soup = BeautifulSoup(r.text, "html.parser")
+        
+        skin_cards = soup.find_all("div", class_=lambda c: c and "skin" in c.lower())
+        if not skin_cards:
+            skin_cards = soup.find_all("a", href=lambda h: h and "skin" in h.lower())
             
         page_new = 0
-        for sk in lst:
-            if DEBUG_SAMPLES and not dumped:
-                print("  [laby] SAMPLE:", json.dumps(sk)[:600]); dumped = True
-                
-            # Laby's internal 32-character MD5 hash
-            h = _first(sk, ["hash", "image_hash", "id"])
-            if not h or h in seen:
+        found_any = False
+        
+        for card in skin_cards:
+            img = card.find("img")
+            if not img:
                 continue
-            seen.add(h)
+                
+            src = img.get("src") or img.get("data-src") or ""
+            name = img.get("alt") or img.get("title") or "TLauncher Skin"
             
-            if h not in known_ids:
+            a_tag = card if card.name == "a" else card.find("a", href=lambda h: h and "download" in h.lower())
+            href = a_tag.get("href") if a_tag else ""
+            
+            m = re.search(r'([0-9a-zA-Z_-]+)\.png', src)
+            sid = m.group(1) if m else None
+            
+            if not sid or sid in seen:
+                continue
+                
+            seen.add(sid)
+            found_any = True
+            
+            if sid not in known_ids:
                 page_new += 1
                 
-            # Extract and clean the name
-            raw_name = _first(sk, ["name", "title", "display_name", "label", "tags"])
-            if isinstance(raw_name, list):  
-                raw_name = " ".join(raw_name[:3]) 
-                
-            clean_name = clean_laby_name(raw_name, h)
-
-            # --- THE DOWNLOAD URL FIX ---
-            # Search the JSON specifically for the 64-character Mojang hash 
-            mojang_hash = _first(sk, ["texture_id", "textureHash", "mojang_hash"])
-            
-            # If the Mojang hash exists and is exactly 64 characters long, use Mojang's official CDN
-            if mojang_hash and len(str(mojang_hash)) == 64:
-                download_url = f"http://textures.minecraft.net/texture/{mojang_hash}"
-            else:
-                # Fallback: Point directly to Laby's internal profile texture CDN
-                download_url = f"https://laby.net/texture/profile/{h}.png"
+            clean_src = src if src.startswith("http") else f"https://tlauncher.org{src}"
+            dl_url = href if href.startswith("http") else f"https://tlauncher.org{href}"
+            if not href:
+                dl_url = clean_src 
                 
             out.append({
-                "source": "laby",
-                "name": clean_name,
-                "image_url": render_from_hash(h),
-                "download_url": download_url, 
-                "downloads": _first(sk, ["useCount", "use_count", "usages", "usage",
-                                         "used", "users", "count", "uses"]),
-                "id": h,
+                "source": "tlauncher",
+                "name": name.strip(),
+                "image_url": clean_src,
+                "download_url": dl_url,
+                "downloads": None,
+                "id": sid,
             })
             
-        offset += size
-        if incremental:
-            known_streak = known_streak + 1 if page_new == 0 else 0
+        if not found_any:
+            print("  [tlauncher] No skins found on this page. Stopping.")
+            break
+            
+        if page_new == 0 and incremental:
+            known_streak += 1
             if known_streak >= STOP_AFTER_KNOWN_PAGES:
-                print("  [laby] reached known skins; stopping (incremental)."); break
-        time.sleep(1.2)
+                print("  [tlauncher] reached known skins; stopping."); break
+        elif page_new == 0:
+            break
+        else:
+            known_streak = 0
+            
+        time.sleep(1.5) 
         
-    return out[:target]
+    return out
+
+# -------------------------------------------------------------- Xyrios ---
+XYRIOS_BASE = "https://xyrios.com/minecraft/skins"
+
+def scrape_xyrios(max_pages, known_ids, incremental):
+    import cloudscraper
+    scraper = cloudscraper.create_scraper(
+        browser={"browser": "chrome", "platform": "linux", "desktop": True})
+    out, seen = [], set()
+    known_streak = 0
+    
+    for n in range(1, max_pages + 1):
+        url = XYRIOS_BASE if n == 1 else f"{XYRIOS_BASE}?page={n}"
+        print(f"  [xyrios] page {n}/{max_pages}")
+        
+        try:
+            r = scraper.get(url, timeout=60)
+        except Exception as e:
+            print(f"  [xyrios] request error: {e}"); break
+            
+        if r.status_code != 200:
+            print(f"  [xyrios] status {r.status_code}, stopping."); break
+            
+        soup = BeautifulSoup(r.text, "html.parser")
+        
+        # Target potential skin containers or direct images
+        images = soup.find_all("img", src=re.compile(r'\.png'))
+        
+        page_new = 0
+        found_any = False
+        
+        for img in images:
+            src = img.get("src") or img.get("data-src") or ""
+            name = img.get("alt") or img.get("title") or "Xyrios Skin"
+            
+            parent_a = img.find_parent("a")
+            href = parent_a.get("href") if parent_a else ""
+            
+            m = re.search(r'([^/]+)\.png', src)
+            sid = m.group(1) if m else None
+            
+            if not sid or sid in seen:
+                continue
+                
+            seen.add(sid)
+            found_any = True
+            
+            if sid not in known_ids:
+                page_new += 1
+                
+            clean_src = src if src.startswith("http") else f"https://xyrios.com{src}"
+            
+            if href.startswith("http"):
+                dl_url = href
+            elif href:
+                dl_url = f"https://xyrios.com{href}"
+            else:
+                dl_url = clean_src
+                
+            out.append({
+                "source": "xyrios",
+                "name": name.strip(),
+                "image_url": clean_src,
+                "download_url": dl_url,
+                "downloads": None,
+                "id": sid,
+            })
+            
+        if not found_any:
+            print("  [xyrios] No skins found on this page. Stopping.")
+            break
+            
+        if page_new == 0 and incremental:
+            known_streak += 1
+            if known_streak >= STOP_AFTER_KNOWN_PAGES:
+                print("  [xyrios] reached known skins; stopping."); break
+        elif page_new == 0:
+            break
+        else:
+            known_streak = 0
+            
+        time.sleep(1.5) 
+        
+    return out
 
 # ---------------------------------------------------------------- Skindex ---
 SKX_BASE = "https://www.minecraftskins.com"
 HREF_RE = re.compile(r'/skin/(\d+)/([^/?#"\']+)')
 IMG_RE = re.compile(r'/uploads/(?:preview-)?skins/[^\s"\']*?-(\d+)\.png')
 
-
 def _skx_extract(page):
-    hrefs = page.eval_on_selector_all(
-        "a[href*='/skin/']", "els => els.map(e => e.getAttribute('href'))")
-    srcs = page.eval_on_selector_all(
-        "img", "els => els.map(e => e.currentSrc || e.getAttribute('src') "
-               "|| e.getAttribute('data-src') || e.getAttribute('data-original') || '')")
-    ids = {}
-    for h in hrefs:
-        m = HREF_RE.search(h or "")
-        if m:
-            ids.setdefault(m.group(1), m.group(2))
-    imgs = {}
-    for s in srcs:
-        s = s or ""
-        m = IMG_RE.search(s)
+    js = """els => els.map(a => {
+        const img = a.querySelector('img');
+        return {
+            href: a.getAttribute('href') || '',
+            name: img ? (img.getAttribute('alt') || '') : a.textContent.trim(),
+            src: img ? (img.currentSrc || img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-original') || '') : ''
+        };
+    })"""
+    items = page.eval_on_selector_all("a[href*='/skin/']", js)
+    ids, imgs, names = {}, {}, {}
+    for item in items:
+        h = item.get('href', '')
+        m = HREF_RE.search(h)
         if not m:
             continue
-        clean = s.split("?")[0]
-        if clean.startswith("/"):
-            clean = SKX_BASE + clean
-        imgs[m.group(1)] = clean
-    return ids, imgs
-
+        sid = m.group(1)
+        slug = m.group(2)
+        ids.setdefault(sid, slug)
+        
+        extracted_name = item.get('name', '').strip()
+        if extracted_name and not names.get(sid):
+            names[sid] = extracted_name
+            
+        s = item.get('src', '')
+        m_img = IMG_RE.search(s)
+        if m_img:
+            img_sid = m_img.group(1)
+            clean = s.split("?")[0]
+            if clean.startswith("/"):
+                clean = SKX_BASE + clean
+            imgs[img_sid] = clean
+            
+    return ids, imgs, names
 
 def scrape_skindex(max_pages, known_ids, incremental):
     from playwright.sync_api import sync_playwright
@@ -226,16 +291,20 @@ def scrape_skindex(max_pages, known_ids, incremental):
                 time.sleep(1)
             if not cleared:
                 print("  [skindex] challenge not cleared; skipping source."); break
-            ids, imgs = _skx_extract(page)
+            
+            ids, imgs, names = _skx_extract(page)
             if not ids:
                 break
             page_new = 0
             for sid, slug in ids.items():
                 if sid not in known_ids:
                     page_new += 1
+                
+                proper_name = names.get(sid) or slug.replace("-", " ").strip()
+                
                 out.append({
                     "source": "skindex",
-                    "name": slug.replace("-", " ").strip(),
+                    "name": proper_name,
                     "image_url": imgs.get(sid) or f"{SKX_BASE}/skin/download/{sid}",
                     "download_url": f"{SKX_BASE}/skin/download/{sid}",
                     "downloads": None,
@@ -264,7 +333,6 @@ NMC_JS = """els => els.map(card => {
     stat_end: q('.position-absolute.bottom-0.end-0'),
   };
 })"""
-
 
 def scrape_namemc(max_pages, known_ids, incremental):
     from playwright.sync_api import sync_playwright
@@ -331,9 +399,7 @@ def scrape_namemc(max_pages, known_ids, incremental):
 
 # -------------------------------------------------------- minecraftskins.net --
 NET_BASE = "https://www.minecraftskins.net"
-NET_IMG_RE = re.compile(
-    r'src="(/static/front_preview/([^"./]+)\.png)"[^>]*?alt="([^"]*)"', re.I)
-
+NET_IMG_RE = re.compile(r'<img\s+[^>]*src="(/static/front_preview/([^"./]+)\.png)"[^>]*>', re.I)
 
 def scrape_mcskins_net(max_pages, known_ids, incremental):
     import cloudscraper
@@ -350,11 +416,19 @@ def scrape_mcskins_net(max_pages, known_ids, incremental):
             print(f"  [mcnet] request error: {e}"); break
         if r.status_code != 200:
             print(f"  [mcnet] status {r.status_code}, stopping."); break
-        matches = NET_IMG_RE.findall(r.text)
-        if not matches:
-            break
+        
+        matches = NET_IMG_RE.finditer(r.text)
+        found_any = False
         page_new = 0
-        for img_path, slug, name in matches:
+        for m in matches:
+            found_any = True
+            img_tag = m.group(0)
+            img_path = m.group(1)
+            slug = m.group(2)
+            
+            alt_m = re.search(r'alt="([^"]*)"', img_tag, re.I)
+            name = alt_m.group(1).strip() if alt_m else slug
+            
             if slug in seen:
                 continue
             seen.add(slug)
@@ -362,12 +436,16 @@ def scrape_mcskins_net(max_pages, known_ids, incremental):
                 page_new += 1
             out.append({
                 "source": "mcnet",
-                "name": name or slug,
+                "name": name,
                 "image_url": f"{NET_BASE}{img_path}",
                 "download_url": f"{NET_BASE}/{slug}/download",
                 "downloads": None,
                 "id": slug,
             })
+            
+        if not found_any:
+            break
+            
         if page_new == 0 and incremental:
             known_streak += 1
             if known_streak >= STOP_AFTER_KNOWN_PAGES:
@@ -397,7 +475,6 @@ def load_existing(path):
         print(f"No existing file at {abspath} -> FIRST RUN.")
     return []
 
-
 def main():
     existing = load_existing(OUTPUT)
     prev_count = len(existing)
@@ -410,15 +487,17 @@ def main():
     for e in existing:
         known_by_source[e.get("source")].add(e.get("id"))
 
-    depth = ({"laby": INIT_LABY, "skindex": INIT_SKINDEX,
+    depth = ({"tlauncher": INIT_TLAUNCHER, "xyrios": INIT_XYRIOS, "skindex": INIT_SKINDEX,
               "namemc": INIT_NAMEMC, "mcnet": INIT_MCNET} if first_run else
-             {"laby": UPD_LABY, "skindex": UPD_SKINDEX,
+             {"tlauncher": UPD_TLAUNCHER, "xyrios": UPD_XYRIOS, "skindex": UPD_SKINDEX,
               "namemc": UPD_NAMEMC, "mcnet": UPD_MCNET})
     incremental = not first_run
 
     jobs = []
-    if ENABLE_LABY:
-        jobs.append(("laby", lambda: scrape_laby(depth["laby"], known_by_source["laby"], incremental)))
+    if ENABLE_TLAUNCHER:
+        jobs.append(("tlauncher", lambda: scrape_tlauncher(depth["tlauncher"], known_by_source["tlauncher"], incremental)))
+    if ENABLE_XYRIOS:
+        jobs.append(("xyrios", lambda: scrape_xyrios(depth["xyrios"], known_by_source["xyrios"], incremental)))
     if ENABLE_SKINDEX:
         jobs.append(("skindex", lambda: scrape_skindex(depth["skindex"], known_by_source["skindex"], incremental)))
     if ENABLE_NAMEMC:
@@ -436,7 +515,6 @@ def main():
         except Exception as e:
             print(f"[{name}] FAILED, skipping: {e}")
 
-    # Merge: keep everything already in the file, append only genuinely new skins.
     added = 0
     for sk in scraped:
         key = (sk.get("source"), sk.get("id"))
@@ -446,7 +524,6 @@ def main():
         existing.append(sk)
         added += 1
 
-    # Final safety dedupe of the WHOLE list by (source, id), keeping first seen.
     deduped, seen_keys = [], set()
     for sk in existing:
         key = (sk.get("source"), sk.get("id"))
@@ -465,9 +542,6 @@ def main():
         print("\nERROR: nothing collected and no existing data. Not writing.")
         sys.exit(1)
 
-    # SAFETY GUARD: on an incremental run, never write fewer skins than we loaded.
-    # If that happens the existing file wasn't read correctly, so we abort rather
-    # than overwrite/replace your data.
     if not first_run and len(existing) < prev_count:
         print(f"\nERROR: merged total ({len(existing)}) is smaller than existing "
               f"({prev_count}). Aborting to avoid replacing your data.")
@@ -481,7 +555,6 @@ def main():
     with open(OUTPUT, "w") as f:
         json.dump(existing, f, indent=4)
     print(f"Saved to {OUTPUT}.")
-
 
 if __name__ == "__main__":
     main()

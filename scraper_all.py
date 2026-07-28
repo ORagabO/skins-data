@@ -124,7 +124,8 @@ def scrape_laby(target, known_ids, incremental):
             if DEBUG_SAMPLES and not dumped:
                 print("  [laby] SAMPLE:", json.dumps(sk)[:600]); dumped = True
                 
-            h = _first(sk, ["hash", "image_hash", "id", "texture_id"])
+            # Laby's internal 32-character MD5 hash
+            h = _first(sk, ["hash", "image_hash", "id"])
             if not h or h in seen:
                 continue
             seen.add(h)
@@ -138,13 +139,23 @@ def scrape_laby(target, known_ids, incremental):
                 raw_name = " ".join(raw_name[:3]) 
                 
             clean_name = clean_laby_name(raw_name, h)
+
+            # --- THE DOWNLOAD URL FIX ---
+            # Search the JSON specifically for the 64-character Mojang hash 
+            mojang_hash = _first(sk, ["texture_id", "textureHash", "mojang_hash"])
+            
+            # If the Mojang hash exists and is exactly 64 characters long, use Mojang's official CDN
+            if mojang_hash and len(str(mojang_hash)) == 64:
+                download_url = f"http://textures.minecraft.net/texture/{mojang_hash}"
+            else:
+                # Fallback: Point directly to Laby's internal profile texture CDN
+                download_url = f"https://laby.net/texture/profile/{h}.png"
                 
             out.append({
                 "source": "laby",
                 "name": clean_name,
                 "image_url": render_from_hash(h),
-                # FIX 1: Point to Laby.net's internal CDN for the raw PNG file
-                "download_url": f"https://laby.net/texture/download/{h}.png",
+                "download_url": download_url, 
                 "downloads": _first(sk, ["useCount", "use_count", "usages", "usage",
                                          "used", "users", "count", "uses"]),
                 "id": h,
@@ -158,7 +169,6 @@ def scrape_laby(target, known_ids, incremental):
         time.sleep(1.2)
         
     return out[:target]
-
 
 # ---------------------------------------------------------------- Skindex ---
 SKX_BASE = "https://www.minecraftskins.com"

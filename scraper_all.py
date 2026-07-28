@@ -142,6 +142,7 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
     return out
 
 # -------------------------------------------------------------- Xyrios ---
+# -------------------------------------------------------------- Xyrios ---
 XYRIOS_BASE = "https://xyrios.com/minecraft/skins"
 
 def scrape_xyrios(max_pages, known_ids, incremental):
@@ -175,9 +176,7 @@ def scrape_xyrios(max_pages, known_ids, incremental):
             src = img.get("src") or img.get("data-src") or ""
             name = img.get("alt") or img.get("title") or "Xyrios Skin"
             
-            parent_a = img.find_parent("a")
-            href = parent_a.get("href") if parent_a else ""
-            
+            # Extract the unique hash from the image filename
             m = re.search(r'([^/]+)\.png', src)
             sid = m.group(1) if m else None
             
@@ -190,20 +189,19 @@ def scrape_xyrios(max_pages, known_ids, incremental):
             if sid not in known_ids:
                 page_new += 1
                 
+            # Keep the preview render as the image_url
             clean_src = src if src.startswith("http") else f"https://xyrios.com{src}"
             
-            if href.startswith("http"):
-                dl_url = href
-            elif href:
-                dl_url = f"https://xyrios.com{href}"
-            else:
-                dl_url = clean_src
+            # Apply your exact URL formats
+            skin_page_url = f"https://xyrios.com/minecraft/skins/{sid}"
+            download_url = f"https://cdn.xyrios.com/skins/{sid}.png"
                 
             out.append({
                 "source": "xyrios",
                 "name": name.strip(),
                 "image_url": clean_src,
-                "download_url": dl_url,
+                "skin_url": skin_page_url,
+                "download_url": download_url,
                 "downloads": None,
                 "id": sid,
             })

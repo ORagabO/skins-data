@@ -63,6 +63,7 @@ TL_BASE = "https://tlauncher.org/en/catalog/skins/"
 def scrape_tlauncher(max_pages, known_ids, incremental):
     import cloudscraper
     from bs4 import BeautifulSoup
+    import re
     
     scraper = cloudscraper.create_scraper(
         browser={"browser": "chrome", "platform": "linux", "desktop": True})
@@ -83,26 +84,21 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
             
         soup = BeautifulSoup(r.text, "html.parser")
         
-        # Find ANY skin image on the page instead of relying on specific div classes
-        images = soup.find_all("img", src=re.compile(r'\.(png|webp)', re.I))
+        # Target the download buttons directly since they contain the clean ID
+        download_links = soup.find_all("a", href=re.compile(r'/catalog/skins/download/(\d+)\.png'))
         
         page_new = 0
         found_any = False
         
-        for img in images:
-            src = img.get("src") or img.get("data-src") or ""
-            
-            # Skip UI elements, logos, and generic website icons
-            if "logo" in src.lower() or "icon" in src.lower() or "avatar" in src.lower():
+        for link in download_links:
+            href = link.get("href")
+            m = re.search(r'/download/(\d+)\.png', href)
+            if not m:
                 continue
                 
-            name = img.get("alt") or img.get("title") or "TLauncher Skin"
+            sid = m.group(1)
             
-            # Extract a unique ID/hash from the image filename
-            m = re.search(r'([^/]+)\.(png|webp)', src, re.I)
-            sid = m.group(1) if m else None
-            
-            if not sid or sid in seen:
+            if sid in seen:
                 continue
                 
             seen.add(sid)
@@ -111,20 +107,14 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
             if sid not in known_ids:
                 page_new += 1
                 
-            clean_src = src if src.startswith("http") else f"https://tlauncher.org{src}"
+            dl_url = f"https://tlauncher.org{href}"
+            # Construct the image preview URL using the exact format from your HTML snippet
+            image_url = f"https://tlauncher.org/catalog/skins/{sid}/img/0/"
             
-            # Find the closest download link attached to this image, fallback to image source
-            parent_a = img.find_parent("a", href=lambda h: h and "download" in h.lower())
-            href = parent_a.get("href") if parent_a else ""
-            dl_url = href if href.startswith("http") else f"https://tlauncher.org{href}"
-            
-            if not href:
-                dl_url = clean_src 
-                
             out.append({
                 "source": "tlauncher",
-                "name": name.strip(),
-                "image_url": clean_src,
+                "name": f"TLauncher Skin {sid}",
+                "image_url": image_url,
                 "download_url": dl_url,
                 "downloads": None,
                 "id": sid,
@@ -146,7 +136,6 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
         time.sleep(1.5) 
         
     return out
-
 # -------------------------------------------------------------- Xyrios ---
 # -------------------------------------------------------------- Xyrios ---
 XYRIOS_BASE = "https://xyrios.com/minecraft/skins"

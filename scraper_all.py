@@ -71,12 +71,36 @@ def render_from_hash(h):
 
 
 # ---------------------------------------------------------------- laby.net --
+def clean_laby_name(raw_name, skin_hash):
+    if not raw_name:
+        return "Minecraft Skin"
+    
+    # Remove weird file extensions if the API returns them
+    name = raw_name.replace(".png", "").replace(".jpg", "")
+    
+    # Replace underscores and hyphens with spaces
+    name = name.replace("_", " ").replace("-", " ")
+    
+    # Remove raw hash strings if the database accidentally used the hash as the name
+    if skin_hash and skin_hash in name:
+        name = name.replace(skin_hash, "").strip()
+        
+    # Title case the name (e.g., "dark boy" -> "Dark Boy")
+    name = name.title().strip()
+    
+    # Fallback if the name ended up empty after cleaning
+    if not name or len(name) < 2:
+        return "Minecraft Skin"
+        
+    return name
+
 def scrape_laby(target, known_ids, incremental):
     import cloudscraper
     scraper = cloudscraper.create_scraper(
         browser={"browser": "chrome", "platform": "linux", "desktop": True})
     out, seen = [], set()
     offset, size, known_streak, dumped = 0, 36, 0, False
+    
     while len(out) < target:
         api = ("https://laby.net/api/v3/search/textures/skin"
                f"?order=most_used&size={size}&offset={offset}")
@@ -84,38 +108,55 @@ def scrape_laby(target, known_ids, incremental):
             r = scraper.get(api, timeout=60)
         except Exception as e:
             print(f"  [laby] request error: {e}"); break
+            
         if r.status_code != 200:
             print(f"  [laby] status {r.status_code}, stopping."); break
+            
         data = r.json()
         lst = data if isinstance(data, list) else _first(
             data, ["results", "data", "textures", "skins", "hits"]) or []
+            
         if not lst:
             break
+            
         page_new = 0
         for sk in lst:
             if DEBUG_SAMPLES and not dumped:
                 print("  [laby] SAMPLE:", json.dumps(sk)[:600]); dumped = True
+                
             h = _first(sk, ["hash", "image_hash", "id", "texture_id"])
             if not h or h in seen:
                 continue
             seen.add(h)
+            
             if h not in known_ids:
                 page_new += 1
+                
+            # Extract and clean the name
+            raw_name = _first(sk, ["name", "title", "display_name", "label", "tags"])
+            if isinstance(raw_name, list):  
+                raw_name = " ".join(raw_name[:3]) 
+                
+            clean_name = clean_laby_name(raw_name, h)
+                
             out.append({
                 "source": "laby",
-                "name": _first(sk, ["name", "title", "display_name", "label"]),
+                "name": clean_name,
                 "image_url": render_from_hash(h),
-                "download_url": f"https://textures.minecraft.net/texture/{h}",
+                # FIX 1: Point to Laby.net's internal CDN for the raw PNG file
+                "download_url": f"https://laby.net/texture/download/{h}.png",
                 "downloads": _first(sk, ["useCount", "use_count", "usages", "usage",
                                          "used", "users", "count", "uses"]),
                 "id": h,
             })
+            
         offset += size
         if incremental:
             known_streak = known_streak + 1 if page_new == 0 else 0
             if known_streak >= STOP_AFTER_KNOWN_PAGES:
                 print("  [laby] reached known skins; stopping (incremental)."); break
         time.sleep(1.2)
+        
     return out[:target]
 
 

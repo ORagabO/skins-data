@@ -75,7 +75,7 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
     known_streak = 0
 
     for n in range(1, max_pages + 1):
-        url = TL_BASE if n == 1 else f"{TL_BASE}page/{n}/"
+        url = TL_BASE if n == 1 else f"{TL_BASE}{n}/"   # pages are /skins/2/, /skins/3/ ...
         print(f"  [tlauncher] page {n}/{max_pages} -> {url}")
 
         try:
@@ -259,11 +259,20 @@ def scrape_skindex(max_pages, known_ids, incremental):
                           wait_until="domcontentloaded", timeout=60000)
             except Exception as e:
                 print(f"  [skindex] nav error: {e}"); break
-            cleared, deadline = False, time.time() + 30
-            while time.time() < deadline:
-                if page.query_selector("a[href*='/skin/']"):
-                    cleared = True; break
-                time.sleep(1)
+            cleared = False
+            for attempt in range(3):
+                deadline = time.time() + 25
+                while time.time() < deadline:
+                    if page.query_selector("a[href*='/skin/']"):
+                        cleared = True; break
+                    time.sleep(1)
+                if cleared:
+                    break
+                print(f"  [skindex] challenge not cleared (attempt {attempt+1}/3); reloading...")
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=60000)
+                except Exception:
+                    pass
             if not cleared:
                 print("  [skindex] challenge not cleared; skipping source."); break
 
@@ -325,11 +334,20 @@ def scrape_namemc(max_pages, known_ids, incremental):
                 page.goto(url, wait_until="domcontentloaded", timeout=60000)
             except Exception as e:
                 print(f"  [namemc] nav error: {e}"); break
-            cleared, deadline = False, time.time() + 30
-            while time.time() < deadline:
-                if page.query_selector("a[href^='/skin/']"):
-                    cleared = True; break
-                time.sleep(1)
+            cleared = False
+            for attempt in range(3):
+                deadline = time.time() + 25
+                while time.time() < deadline:
+                    if page.query_selector("a[href^='/skin/']"):
+                        cleared = True; break
+                    time.sleep(1)
+                if cleared:
+                    break
+                print(f"  [namemc] challenge not cleared (attempt {attempt+1}/3); reloading...")
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=60000)
+                except Exception:
+                    pass
             if not cleared:
                 print("  [namemc] cards not found; skipping source."); break
             cards = page.eval_on_selector_all("div.card", NMC_JS)

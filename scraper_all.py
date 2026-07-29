@@ -77,7 +77,7 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
     known_streak = 0
 
     for n in range(1, max_pages + 1):
-        # TLauncher pagination uses /skins/2/, /skins/3/ ...
+        # Using the exact pagination structure you provided (e.g., .../skins/2/, .../skins/3/)
         url = TL_BASE if n == 1 else f"{TL_BASE}{n}/"
         print(f"  [tlauncher] page {n}/{max_pages} -> {url}")
 
@@ -89,33 +89,35 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
         if r.status_code != 200:
             print(f"  [tlauncher] status {r.status_code}, stopping."); break
 
-        soup = BeautifulSoup(r.text, "html.parser")
+        # -------------------------------------------------------------------
+        # NEW APPROACH: Pure Regex on raw HTML instead of BeautifulSoup
+        # This completely bypasses any missing classes or DOM structural issues
+        # -------------------------------------------------------------------
+        found_ids = set()
         
-        # Targeting the exact class provided in the HTML snippet
-        download_links = soup.find_all("a", class_="set-download")
-
+        # 1. Match IDs from the download buttons (e.g., href="/catalog/skins/download/1.png")
+        for m in re.finditer(r'/download/(\d+)\.png', r.text):
+            found_ids.add(m.group(1))
+            
+        # 2. Backup Match: Catch IDs from the image sources (e.g., src="/catalog/skins/1/img/0/")
+        for m in re.finditer(r'/catalog/skins/(\d+)/img/', r.text):
+            found_ids.add(m.group(1))
+            
+        if not found_ids:
+            print("  [tlauncher] No skins found on this page (Challenge or end of list). Stopping.")
+            break
+            
         page_new = 0
-        found_any = False
-
-        for link in download_links:
-            href = link.get("href", "")
-            
-            # Extract ID from the href (e.g., /catalog/skins/download/1.png)
-            m = re.search(r'download/(\d+)\.png', href)
-            if not m:
-                continue
-                
-            sid = m.group(1)
-            
+        
+        for sid in found_ids:
             if sid in seen:
                 continue
             seen.add(sid)
-            found_any = True
             
             if sid not in known_ids:
                 page_new += 1
 
-            dl_url = href if href.startswith("http") else f"https://tlauncher.org{href}"
+            dl_url = f"https://tlauncher.org/catalog/skins/download/{sid}.png"
             image_url = f"https://tlauncher.org/catalog/skins/{sid}/img/0/"
 
             out.append({
@@ -127,24 +129,21 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
                 "id": sid,
             })
 
-        # If we didn't find any unique IDs on this page, stop to prevent infinite loops
-        if not found_any:
-            print("  [tlauncher] No new skins found on this page (duplicates or empty). Stopping.")
-            break
-            
+        # Logic to safely stop if we stop finding new skins
         if page_new == 0 and incremental:
             known_streak += 1
             if known_streak >= STOP_AFTER_KNOWN_PAGES:
                 print("  [tlauncher] reached known skins; stopping."); break
         elif page_new == 0:
+            print(f"  [tlauncher] Found {len(found_ids)} skins, but all were duplicates. Stopping to prevent loop.")
             break
         else:
             known_streak = 0
             
-        time.sleep(1.5)
+        # Slightly increased delay to ensure TLauncher doesn't rate-limit pagination
+        time.sleep(2) 
 
     return out
-
 # -------------------------------------------------------------- Xyrios ---
 XYRIOS_BASE = "https://xyrios.com/minecraft/skins"
 

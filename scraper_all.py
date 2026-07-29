@@ -10,12 +10,19 @@ from bs4 import BeautifulSoup
 # ==========================================================================
 # Multi-source Minecraft skin collector with INITIAL BACKFILL + INCREMENTAL.
 #
-#   * First run  (skins_all.json missing/empty): scrape a large batch.
-#   * Later runs (skins_all.json exists):        only ADD newly-added skins.
-#
 # Sources: TLauncher, Xyrios, The Skindex, NameMC, minecraftskins.net
-# Common shape per entry:
-#   {"source","name","image_url","download_url","downloads","id"}
+#
+# OUTPUT schema (only these fields, per request):
+#   {
+#     "source": <site>,
+#     "name":   <str or null>,
+#     "image":  <url or null>,
+#     "download": <url>          # key OMITTED entirely when not available
+#   }
+#
+# Internally each scraper still produces an "id" (+ image_url/download_url) so
+# de-duplication and incremental "add-only-new" keep working. Ids are stripped
+# at save time and re-derived from the stored URLs on the next run.
 # ==========================================================================
 
 # ---- toggles -------------------------------------------------------------
@@ -25,26 +32,27 @@ ENABLE_SKINDEX = True
 ENABLE_NAMEMC = True
 ENABLE_MCNET = True
 
-# ---- INITIAL run depths (aim ~50k total; tune to taste) ------------------
-INIT_TLAUNCHER = 500  
-INIT_XYRIOS = 200
-INIT_SKINDEX = 200    
-INIT_NAMEMC = 200     
-INIT_MCNET = 25       
+# ---- INITIAL run depths — set HIGH to pull the MAXIMUM number of skins ----
+# Each source paginates until it runs out or hits its cap. Raise for more.
+INIT_TLAUNCHER = 1000
+INIT_XYRIOS = 1000
+INIT_SKINDEX = 1000
+INIT_NAMEMC = 1000
+INIT_MCNET = 100
 
 # ---- INCREMENTAL run depths (small; early-stop ends them sooner) ---------
-UPD_TLAUNCHER = 25
-UPD_XYRIOS = 25
-UPD_SKINDEX = 25
-UPD_NAMEMC = 25
-UPD_MCNET = 8
+UPD_TLAUNCHER = 30
+UPD_XYRIOS = 30
+UPD_SKINDEX = 40
+UPD_NAMEMC = 40
+UPD_MCNET = 30
 
 STOP_AFTER_KNOWN_PAGES = 2   # incremental: stop a source after N all-known pages
 
 OUTPUT = "skins_all.json"
-SHUFFLE = True               
-MAX_TOTAL_FIRST_RUN = None   
-DEBUG_SAMPLES = False        
+SHUFFLE = True
+MAX_TOTAL_FIRST_RUN = None
+DEBUG_SAMPLES = False
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -57,60 +65,49 @@ window.chrome = { runtime: {} };
 """
 
 # -------------------------------------------------------------- TLauncher ---
-# -------------------------------------------------------------- TLauncher ---
 TL_BASE = "https://tlauncher.org/en/catalog/skins/"
 
 def scrape_tlauncher(max_pages, known_ids, incremental):
     import cloudscraper
-    from bs4 import BeautifulSoup
-    import re
-    
     scraper = cloudscraper.create_scraper(
         browser={"browser": "chrome", "platform": "linux", "desktop": True})
     out, seen = [], set()
     known_streak = 0
-    
+
     for n in range(1, max_pages + 1):
         url = TL_BASE if n == 1 else f"{TL_BASE}page/{n}/"
         print(f"  [tlauncher] page {n}/{max_pages} -> {url}")
-        
+
         try:
             r = scraper.get(url, timeout=60)
         except Exception as e:
             print(f"  [tlauncher] request error: {e}"); break
-            
+
         if r.status_code != 200:
             print(f"  [tlauncher] status {r.status_code}, stopping."); break
-            
+
         soup = BeautifulSoup(r.text, "html.parser")
-        
-        # Target the download buttons directly since they contain the clean ID
         download_links = soup.find_all("a", href=re.compile(r'/catalog/skins/download/(\d+)\.png'))
-        
+
         page_new = 0
         found_any = False
-        
+
         for link in download_links:
             href = link.get("href")
             m = re.search(r'/download/(\d+)\.png', href)
             if not m:
                 continue
-                
             sid = m.group(1)
-            
             if sid in seen:
                 continue
-                
             seen.add(sid)
             found_any = True
-            
             if sid not in known_ids:
                 page_new += 1
-                
+
             dl_url = f"https://tlauncher.org{href}"
-            # Construct the image preview URL using the exact format from your HTML snippet
             image_url = f"https://tlauncher.org/catalog/skins/{sid}/img/0/"
-            
+
             out.append({
                 "source": "tlauncher",
                 "name": f"TLauncher Skin {sid}",
@@ -119,11 +116,10 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
                 "downloads": None,
                 "id": sid,
             })
-            
+
         if not found_any:
             print("  [tlauncher] No skins found on this page. Stopping.")
             break
-            
         if page_new == 0 and incremental:
             known_streak += 1
             if known_streak >= STOP_AFTER_KNOWN_PAGES:
@@ -132,11 +128,10 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
             break
         else:
             known_streak = 0
-            
-        time.sleep(1.5) 
-        
+        time.sleep(1.5)
+
     return out
-# -------------------------------------------------------------- Xyrios ---
+
 # -------------------------------------------------------------- Xyrios ---
 XYRIOS_BASE = "https://xyrios.com/minecraft/skins"
 
@@ -146,65 +141,53 @@ def scrape_xyrios(max_pages, known_ids, incremental):
         browser={"browser": "chrome", "platform": "linux", "desktop": True})
     out, seen = [], set()
     known_streak = 0
-    
+
     for n in range(1, max_pages + 1):
         url = XYRIOS_BASE if n == 1 else f"{XYRIOS_BASE}?page={n}"
         print(f"  [xyrios] page {n}/{max_pages}")
-        
+
         try:
             r = scraper.get(url, timeout=60)
         except Exception as e:
             print(f"  [xyrios] request error: {e}"); break
-            
+
         if r.status_code != 200:
             print(f"  [xyrios] status {r.status_code}, stopping."); break
-            
+
         soup = BeautifulSoup(r.text, "html.parser")
-        
-        # Target potential skin containers or direct images
         images = soup.find_all("img", src=re.compile(r'\.png'))
-        
+
         page_new = 0
         found_any = False
-        
+
         for img in images:
             src = img.get("src") or img.get("data-src") or ""
             name = img.get("alt") or img.get("title") or "Xyrios Skin"
-            
-            # Extract the unique hash from the image filename
+
             m = re.search(r'([^/]+)\.png', src)
             sid = m.group(1) if m else None
-            
             if not sid or sid in seen:
                 continue
-                
             seen.add(sid)
             found_any = True
-            
             if sid not in known_ids:
                 page_new += 1
-                
-            # Keep the preview render as the image_url
+
             clean_src = src if src.startswith("http") else f"https://xyrios.com{src}"
-            
-            # Apply your exact URL formats
-            skin_page_url = f"https://xyrios.com/minecraft/skins/{sid}"
             download_url = f"https://cdn.xyrios.com/skins/{sid}.png"
-                
+
             out.append({
                 "source": "xyrios",
                 "name": name.strip(),
                 "image_url": clean_src,
-                "skin_url": skin_page_url,
                 "download_url": download_url,
                 "downloads": None,
                 "id": sid,
             })
-            
+
         if not found_any:
             print("  [xyrios] No skins found on this page. Stopping.")
             break
-            
         if page_new == 0 and incremental:
             known_streak += 1
             if known_streak >= STOP_AFTER_KNOWN_PAGES:
@@ -213,9 +196,8 @@ def scrape_xyrios(max_pages, known_ids, incremental):
             break
         else:
             known_streak = 0
-            
-        time.sleep(1.5) 
-        
+        time.sleep(1.5)
+
     return out
 
 # ---------------------------------------------------------------- Skindex ---
@@ -242,11 +224,11 @@ def _skx_extract(page):
         sid = m.group(1)
         slug = m.group(2)
         ids.setdefault(sid, slug)
-        
+
         extracted_name = item.get('name', '').strip()
         if extracted_name and not names.get(sid):
             names[sid] = extracted_name
-            
+
         s = item.get('src', '')
         m_img = IMG_RE.search(s)
         if m_img:
@@ -255,7 +237,7 @@ def _skx_extract(page):
             if clean.startswith("/"):
                 clean = SKX_BASE + clean
             imgs[img_sid] = clean
-            
+
     return ids, imgs, names
 
 def scrape_skindex(max_pages, known_ids, incremental):
@@ -284,7 +266,7 @@ def scrape_skindex(max_pages, known_ids, incremental):
                 time.sleep(1)
             if not cleared:
                 print("  [skindex] challenge not cleared; skipping source."); break
-            
+
             ids, imgs, names = _skx_extract(page)
             if not ids:
                 break
@@ -292,9 +274,7 @@ def scrape_skindex(max_pages, known_ids, incremental):
             for sid, slug in ids.items():
                 if sid not in known_ids:
                     page_new += 1
-                
                 proper_name = names.get(sid) or slug.replace("-", " ").strip()
-                
                 out.append({
                     "source": "skindex",
                     "name": proper_name,
@@ -310,7 +290,6 @@ def scrape_skindex(max_pages, known_ids, incremental):
             time.sleep(1.5)
         browser.close()
     return out
-
 
 # ----------------------------------------------------------------- NameMC ---
 NMC_BASE = "https://namemc.com/minecraft-skins"
@@ -389,7 +368,6 @@ def scrape_namemc(max_pages, known_ids, incremental):
         browser.close()
     return out
 
-
 # -------------------------------------------------------- minecraftskins.net --
 NET_BASE = "https://www.minecraftskins.net"
 NET_IMG_RE = re.compile(r'<img\s+[^>]*src="(/static/front_preview/([^"./]+)\.png)"[^>]*>', re.I)
@@ -409,7 +387,7 @@ def scrape_mcskins_net(max_pages, known_ids, incremental):
             print(f"  [mcnet] request error: {e}"); break
         if r.status_code != 200:
             print(f"  [mcnet] status {r.status_code}, stopping."); break
-        
+
         matches = NET_IMG_RE.finditer(r.text)
         found_any = False
         page_new = 0
@@ -418,10 +396,10 @@ def scrape_mcskins_net(max_pages, known_ids, incremental):
             img_tag = m.group(0)
             img_path = m.group(1)
             slug = m.group(2)
-            
+
             alt_m = re.search(r'alt="([^"]*)"', img_tag, re.I)
             name = alt_m.group(1).strip() if alt_m else slug
-            
+
             if slug in seen:
                 continue
             seen.add(slug)
@@ -435,10 +413,9 @@ def scrape_mcskins_net(max_pages, known_ids, incremental):
                 "downloads": None,
                 "id": slug,
             })
-            
+
         if not found_any:
             break
-            
         if page_new == 0 and incremental:
             known_streak += 1
             if known_streak >= STOP_AFTER_KNOWN_PAGES:
@@ -448,6 +425,48 @@ def scrape_mcskins_net(max_pages, known_ids, incremental):
         else:
             known_streak = 0
         time.sleep(1.2)
+    return out
+
+
+# ------------------------------------------------------------- helpers -----
+def derive_id(e):
+    """Re-derive a stable per-source id from a stored minimal entry's URLs,
+    so incremental de-dup keeps working even though 'id' isn't saved."""
+    src = e.get("source")
+    img = e.get("image") or e.get("image_url") or ""
+    dl = e.get("download") or e.get("download_url") or ""
+    if src == "tlauncher":
+        m = re.search(r'/catalog/skins/(\d+)/img', img) or re.search(r'/download/(\d+)\.png', dl)
+    elif src == "xyrios":
+        m = re.search(r'/([^/]+)\.png', dl) or re.search(r'/([^/]+)\.png', img)
+    elif src == "skindex":
+        m = re.search(r'/skin/download/(\d+)', dl) or re.search(r'-(\d+)\.png', img)
+    elif src == "namemc":
+        m = re.search(r'/skin/([0-9a-fA-F]+)', dl) or re.search(r'[?&]id=([0-9a-fA-F]+)', img)
+    elif src == "mcnet":
+        m = re.search(r'/([^/]+)/download', dl) or re.search(r'front_preview/([^/.]+)\.png', img)
+    else:
+        m = None
+    return m.group(1) if m else (img or dl or e.get("name"))
+
+
+def project(e):
+    """Reduce any entry to the required output schema.
+    - name : value or None
+    - image: value or None
+    - download: included ONLY when present
+    - source
+    """
+    name = e.get("name")
+    image = e.get("image") or e.get("image_url")
+    download = e.get("download") or e.get("download_url")
+    out = {
+        "source": e.get("source"),
+        "name": name if name not in ("", None) else None,
+        "image": image if image not in ("", None) else None,
+    }
+    if download:
+        out["download"] = download
     return out
 
 
@@ -470,6 +489,11 @@ def load_existing(path):
 
 def main():
     existing = load_existing(OUTPUT)
+    # Attach a working 'id' back onto minimal stored entries for de-dup.
+    for e in existing:
+        if not e.get("id"):
+            e["id"] = derive_id(e)
+
     prev_count = len(existing)
     first_run = len(existing) == 0
     print(f"Mode: {'FIRST RUN (backfill)' if first_run else 'INCREMENTAL (add new only)'}"
@@ -545,9 +569,11 @@ def main():
         by_source[e.get("source")] += 1
     print(f"\nAdded {added} new skins. Total now: {len(existing)}. Breakdown: {dict(by_source)}")
 
+    # Write ONLY the required fields.
+    output_data = [project(e) for e in existing]
     with open(OUTPUT, "w") as f:
-        json.dump(existing, f, indent=4)
-    print(f"Saved to {OUTPUT}.")
+        json.dump(output_data, f, indent=4)
+    print(f"Saved {len(output_data)} skins to {OUTPUT}.")
 
 if __name__ == "__main__":
     main()

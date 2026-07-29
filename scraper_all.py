@@ -65,6 +65,7 @@ window.chrome = { runtime: {} };
 """
 
 # -------------------------------------------------------------- TLauncher ---
+# -------------------------------------------------------------- TLauncher ---
 TL_BASE = "https://tlauncher.org/en/catalog/skins"
 
 def scrape_tlauncher(max_pages, known_ids, incremental):
@@ -149,7 +150,6 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
         browser.close()
         
     return out
-
 # -------------------------------------------------------------- Xyrios ---
 XYRIOS_BASE = "https://xyrios.com/minecraft/skins"
 

@@ -99,20 +99,19 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
             content = page.content()
             found_ids = set()
             
-            # Scrape IDs directly from the raw HTML structure
+     # Scrape IDs directly from the raw HTML structure
             for m in re.finditer(r'/download/(\d+)\.png', content):
                 found_ids.add(m.group(1))
 
             print(f"  [tlauncher] DEBUG: Found {len(found_ids)} total skins on this page.")
 
-         if not found_ids:
+            if not found_ids:
                 print("  [tlauncher] DEBUG: 0 skins found. The page might be empty or blocked. Stopping.")
                 print(f"  [tlauncher] DEBUG PAGE TITLE: {page.title()}")
                 
                 # Print the first 500 characters of the raw HTML to see what TLauncher actually served
                 print(f"  [tlauncher] DEBUG HTML SNIPPET: {content[:500]}")
                 break
-                
             page_new = 0
             
             for sid in found_ids:

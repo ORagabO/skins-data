@@ -65,6 +65,7 @@ window.chrome = { runtime: {} };
 """
 
 # -------------------------------------------------------------- TLauncher ---
+# -------------------------------------------------------------- TLauncher ---
 TL_BASE = "https://tlauncher.org/en/catalog/skins/"
 
 def scrape_tlauncher(max_pages, known_ids, incremental):
@@ -75,7 +76,8 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
     known_streak = 0
 
     for n in range(1, max_pages + 1):
-        url = TL_BASE if n == 1 else f"{TL_BASE}{n}/"   # pages are /skins/2/, /skins/3/ ...
+        # TLauncher pagination uses /page/n/ 
+        url = TL_BASE if n == 1 else f"{TL_BASE}page/{n}/"
         print(f"  [tlauncher] page {n}/{max_pages} -> {url}")
 
         try:
@@ -87,25 +89,31 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
             print(f"  [tlauncher] status {r.status_code}, stopping."); break
 
         soup = BeautifulSoup(r.text, "html.parser")
-        download_links = soup.find_all("a", href=re.compile(r'/catalog/skins/download/(\d+)\.png'))
+        
+        # Loosened regex to ignore the language prefix (e.g., /en/) and capture the ID properly
+        download_links = soup.find_all("a", href=re.compile(r'/download/(\d+)(?:\.png)?'))
 
         page_new = 0
         found_any = False
 
         for link in download_links:
             href = link.get("href")
-            m = re.search(r'/download/(\d+)\.png', href)
+            m = re.search(r'/download/(\d+)(?:\.png)?', href)
             if not m:
                 continue
+                
             sid = m.group(1)
+            
             if sid in seen:
                 continue
             seen.add(sid)
             found_any = True
+            
             if sid not in known_ids:
                 page_new += 1
 
-            dl_url = f"https://tlauncher.org{href}"
+            # Build absolute URLs
+            dl_url = href if href.startswith("http") else f"https://tlauncher.org{href}"
             image_url = f"https://tlauncher.org/catalog/skins/{sid}/img/0/"
 
             out.append({
@@ -120,6 +128,7 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
         if not found_any:
             print("  [tlauncher] No skins found on this page. Stopping.")
             break
+            
         if page_new == 0 and incremental:
             known_streak += 1
             if known_streak >= STOP_AFTER_KNOWN_PAGES:
@@ -128,6 +137,7 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
             break
         else:
             known_streak = 0
+            
         time.sleep(1.5)
 
     return out

@@ -10,7 +10,8 @@ from bs4 import BeautifulSoup
 # ==========================================================================
 # Multi-source Minecraft skin collector with INITIAL BACKFILL + INCREMENTAL.
 #
-# Sources: TLauncher, Xyrios, The Skindex, NameMC, minecraftskins.net
+# Sources: TLauncher, Xyrios, The Skindex, NameMC, minecraftskins.net, 
+#          SkinsMC, MineSkin
 #
 # OUTPUT schema (only these fields, per request):
 #   {
@@ -19,10 +20,6 @@ from bs4 import BeautifulSoup
 #     "image":  <url or null>,
 #     "download": <url>          # key OMITTED entirely when not available
 #   }
-#
-# Internally each scraper still produces an "id" (+ image_url/download_url) so
-# de-duplication and incremental "add-only-new" keep working. Ids are stripped
-# at save time and re-derived from the stored URLs on the next run.
 # ==========================================================================
 
 # ---- toggles -------------------------------------------------------------
@@ -31,14 +28,17 @@ ENABLE_XYRIOS = True
 ENABLE_SKINDEX = True
 ENABLE_NAMEMC = True
 ENABLE_MCNET = True
+ENABLE_SKINSMC = True
+ENABLE_MINESKIN = True
 
 # ---- INITIAL run depths — set HIGH to pull the MAXIMUM number of skins ----
-# Each source paginates until it runs out or hits its cap. Raise for more.
 INIT_TLAUNCHER = 1000
 INIT_XYRIOS = 1000
 INIT_SKINDEX = 1000
 INIT_NAMEMC = 1000
 INIT_MCNET = 100
+INIT_SKINSMC = 1000
+INIT_MINESKIN = 20  # Keep low to respect 20 requests/minute API limits
 
 # ---- INCREMENTAL run depths (small; early-stop ends them sooner) ---------
 UPD_TLAUNCHER = 30
@@ -46,6 +46,8 @@ UPD_XYRIOS = 30
 UPD_SKINDEX = 40
 UPD_NAMEMC = 40
 UPD_MCNET = 30
+UPD_SKINSMC = 30
+UPD_MINESKIN = 5
 
 STOP_AFTER_KNOWN_PAGES = 2   # incremental: stop a source after N all-known pages
 
@@ -64,7 +66,6 @@ Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
 window.chrome = { runtime: {} };
 """
 
-# -------------------------------------------------------------- TLauncher ---
 # -------------------------------------------------------------- TLauncher ---
 TL_BASE = "https://tlauncher.org/en/catalog/skins"
 
@@ -87,13 +88,8 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
             print(f"  [tlauncher] Navigating to page {n}/{max_pages} -> {url}")
 
             try:
-                # 1. Wait for background APIs to finish loading
                 page.goto(url, wait_until="networkidle", timeout=60000)
-                
-                # 2. Scroll to the bottom to trigger any lazy-loaded XHR scripts
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                
-                # 3. Give the DOM an extra 3 seconds to inject the skins
                 page.wait_for_timeout(3000) 
             except Exception as e:
                 print(f"  [tlauncher] Navigation error or timeout: {e}")
@@ -102,13 +98,10 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
             content = page.content()
             found_ids = set()
             
-            # --- Double Regex Net ---
             for m in re.finditer(r'/download/(\d+)\.png', content):
                 found_ids.add(m.group(1))
-                
             for m in re.finditer(r'/catalog/skins/(\d+)/img', content):
                 found_ids.add(m.group(1))
-            # ------------------------
 
             print(f"  [tlauncher] DEBUG: Found {len(found_ids)} total skins on this page.")
 
@@ -117,12 +110,10 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
                 break
                 
             page_new = 0
-            
             for sid in found_ids:
                 if sid in seen:
                     continue
                 seen.add(sid)
-                
                 if sid not in known_ids:
                     page_new += 1
 
@@ -142,18 +133,17 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
 
             if page_new == 0 and incremental:
                 known_streak += 1
-                print(f"  [tlauncher] DEBUG: Hit known skins. Streak: {known_streak}/{STOP_AFTER_KNOWN_PAGES}")
                 if known_streak >= STOP_AFTER_KNOWN_PAGES:
-                    print("  [tlauncher] Reached known skins limit. Stopping to save time."); break
+                    print("  [tlauncher] Reached known skins limit. Stopping."); break
             elif page_new == 0:
-                print(f"  [tlauncher] DEBUG: Found {len(found_ids)} skins, but ALL of them were duplicates of Page 1. Stopping to prevent an infinite loop.")
+                print(f"  [tlauncher] Found {len(found_ids)} duplicate skins. Stopping.")
                 break
             else:
                 known_streak = 0
 
         browser.close()
-        
     return out
+
 # -------------------------------------------------------------- Xyrios ---
 XYRIOS_BASE = "https://xyrios.com/minecraft/skins"
 
@@ -277,8 +267,7 @@ def scrape_skindex(max_pages, known_ids, incremental):
         for n in range(1, max_pages + 1):
             print(f"  [skindex] page {n}/{max_pages}")
             try:
-                page.goto(f"{SKX_BASE}/latest/{n}/",
-                          wait_until="domcontentloaded", timeout=60000)
+                page.goto(f"{SKX_BASE}/latest/{n}/", wait_until="domcontentloaded", timeout=60000)
             except Exception as e:
                 print(f"  [skindex] nav error: {e}"); break
             cleared = False
@@ -373,8 +362,6 @@ def scrape_namemc(max_pages, known_ids, incremental):
             if not cleared:
                 print("  [namemc] cards not found; skipping source."); break
             cards = page.eval_on_selector_all("div.card", NMC_JS)
-            if DEBUG_SAMPLES and cards:
-                print("  [namemc] SAMPLE:", json.dumps(cards[0])[:400])
             page_new = 0
             for c in cards:
                 m = NMC_ID_RE.search(c.get("href") or "")
@@ -467,11 +454,151 @@ def scrape_mcskins_net(max_pages, known_ids, incremental):
         time.sleep(1.2)
     return out
 
+# ---------------------------------------------------------------- SkinsMC ---
+SKINSMC_BASE = "https://skinsmc.org/latest"
+
+def scrape_skinsmc(max_pages, known_ids, incremental):
+    from playwright.sync_api import sync_playwright
+    out, seen = [], set()
+    known_streak = 0
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False, args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox", "--disable-dev-shm-usage", "--start-maximized"])
+        ctx = browser.new_context(user_agent=UA,
+                                  viewport={"width": 1366, "height": 768}, locale="en-US")
+        ctx.add_init_script(STEALTH_JS)
+        page = ctx.new_page()
+
+        for n in range(1, max_pages + 1):
+            url = f"{SKINSMC_BASE}/{n}" if n > 1 else SKINSMC_BASE
+            print(f"  [skinsmc] Navigating to page {n}/{max_pages} -> {url}")
+
+            try:
+                page.goto(url, wait_until="networkidle", timeout=60000)
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_timeout(2000) 
+            except Exception as e:
+                print(f"  [skinsmc] Navigation error or timeout: {e}")
+                break
+
+            content = page.content()
+            found_ids = set()
+            
+            for m in re.finditer(r'/skin/([a-zA-Z0-9]+)', content):
+                found_ids.add(m.group(1))
+
+            if not found_ids:
+                print("  [skinsmc] 0 skins found. Stopping.")
+                break
+                
+            page_new = 0
+            for sid in found_ids:
+                if sid in seen:
+                    continue
+                seen.add(sid)
+                if sid not in known_ids:
+                    page_new += 1
+
+                dl_url = f"https://skinsmc.org/api/skin/{sid}/download"
+                image_url = f"https://skinsmc.org/api/skin/{sid}/render"
+
+                out.append({
+                    "source": "skinsmc",
+                    "name": f"SkinsMC {sid}",
+                    "image_url": image_url,
+                    "download_url": dl_url,
+                    "downloads": None,
+                    "id": sid,
+                })
+
+            if page_new == 0 and incremental:
+                known_streak += 1
+                if known_streak >= STOP_AFTER_KNOWN_PAGES:
+                    print("  [skinsmc] Reached known skins limit. Stopping."); break
+            elif page_new == 0:
+                break
+            else:
+                known_streak = 0
+
+        browser.close()
+    return out
+
+# --------------------------------------------------------------- MineSkin ---
+MINESKIN_API_BASE = "https://api.mineskin.org/v2/skins"
+
+def scrape_mineskin(max_pages, known_ids, incremental):
+    import cloudscraper
+    scraper = cloudscraper.create_scraper()
+    out, seen = [], set()
+    known_streak = 0
+    
+    for n in range(1, max_pages + 1):
+        url = f"{MINESKIN_API_BASE}?limit=20&page={n}"
+        print(f"  [mineskin] Fetching API page {n}/{max_pages}")
+        
+        try:
+            r = scraper.get(url, timeout=30)
+            if r.status_code == 429:
+                print("  [mineskin] Rate limit hit (429). Sleeping for 10 seconds...")
+                time.sleep(10)
+                continue
+            elif r.status_code != 200:
+                print(f"  [mineskin] API error {r.status_code}. Stopping.")
+                break
+                
+            data = r.json()
+        except Exception as e:
+            print(f"  [mineskin] Request error: {e}")
+            break
+            
+        skins = data.get("skins", [])
+        if not skins:
+            print("  [mineskin] No more skins in API response. Stopping.")
+            break
+            
+        page_new = 0
+        for skin in skins:
+            sid = skin.get("uuid")
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            
+            if sid not in known_ids:
+                page_new += 1
+                
+            name = skin.get("name", "MineSkin")
+            try:
+                image_url = skin['texture']['data']['url']['skin']
+            except (KeyError, TypeError):
+                image_url = None
+
+            out.append({
+                "source": "mineskin",
+                "name": name if name else f"MineSkin {sid}",
+                "image_url": image_url,
+                "download_url": image_url,
+                "downloads": None,
+                "id": sid,
+            })
+            
+        if page_new == 0 and incremental:
+            known_streak += 1
+            if known_streak >= STOP_AFTER_KNOWN_PAGES:
+                print("  [mineskin] Reached known skins limit. Stopping."); break
+        elif page_new == 0:
+            break
+        else:
+            known_streak = 0
+            
+        time.sleep(3.5) 
+        
+    return out
+
 
 # ------------------------------------------------------------- helpers -----
 def derive_id(e):
-    """Re-derive a stable per-source id from a stored minimal entry's URLs,
-    so incremental de-dup keeps working even though 'id' isn't saved."""
     src = e.get("source")
     img = e.get("image") or e.get("image_url") or ""
     dl = e.get("download") or e.get("download_url") or ""
@@ -485,14 +612,16 @@ def derive_id(e):
         m = re.search(r'/skin/([0-9a-fA-F]+)', dl) or re.search(r'[?&]id=([0-9a-fA-F]+)', img)
     elif src == "mcnet":
         m = re.search(r'/([^/]+)/download', dl) or re.search(r'front_preview/([^/.]+)\.png', img)
+    elif src == "skinsmc":
+        m = re.search(r'/skin/([a-zA-Z0-9]+)/', img) or re.search(r'/skin/([a-zA-Z0-9]+)/', dl)
+    elif src == "mineskin":
+        m = re.search(r'MineSkin ([a-zA-Z0-9-]+)', e.get("name", "")) 
     else:
         m = None
     return m.group(1) if m else (img or dl or e.get("name"))
 
 
 def project(e):
-    """Reduce any entry to the required output schema:
-    source, name (or null), image (or null), download (only if present)."""
     name = e.get("name")
     image = e.get("image") or e.get("image_url")
     download = e.get("download") or e.get("download_url")
@@ -513,11 +642,9 @@ def load_existing(path):
         try:
             with open(path) as f:
                 data = json.load(f)
-            # New format: {"total":..., "sources":..., "skins":[...]}
             if isinstance(data, dict) and isinstance(data.get("skins"), list):
                 print(f"Loaded {len(data['skins'])} existing skins from {abspath}")
                 return data["skins"]
-            # Old format: a bare list of skins
             if isinstance(data, list):
                 print(f"Loaded {len(data)} existing skins from {abspath}")
                 return data
@@ -530,7 +657,6 @@ def load_existing(path):
 
 def main():
     existing = load_existing(OUTPUT)
-    # Attach a working 'id' back onto minimal stored entries for de-dup.
     for e in existing:
         if not e.get("id"):
             e["id"] = derive_id(e)
@@ -546,9 +672,9 @@ def main():
         known_by_source[e.get("source")].add(e.get("id"))
 
     depth = ({"tlauncher": INIT_TLAUNCHER, "xyrios": INIT_XYRIOS, "skindex": INIT_SKINDEX,
-              "namemc": INIT_NAMEMC, "mcnet": INIT_MCNET} if first_run else
+              "namemc": INIT_NAMEMC, "mcnet": INIT_MCNET, "skinsmc": INIT_SKINSMC, "mineskin": INIT_MINESKIN} if first_run else
              {"tlauncher": UPD_TLAUNCHER, "xyrios": UPD_XYRIOS, "skindex": UPD_SKINDEX,
-              "namemc": UPD_NAMEMC, "mcnet": UPD_MCNET})
+              "namemc": UPD_NAMEMC, "mcnet": UPD_MCNET, "skinsmc": UPD_SKINSMC, "mineskin": UPD_MINESKIN})
     incremental = not first_run
 
     jobs = []
@@ -562,6 +688,10 @@ def main():
         jobs.append(("namemc", lambda: scrape_namemc(depth["namemc"], known_by_source["namemc"], incremental)))
     if ENABLE_MCNET:
         jobs.append(("mcnet", lambda: scrape_mcskins_net(depth["mcnet"], known_by_source["mcnet"], incremental)))
+    if ENABLE_SKINSMC:
+        jobs.append(("skinsmc", lambda: scrape_skinsmc(depth["skinsmc"], known_by_source["skinsmc"], incremental)))
+    if ENABLE_MINESKIN:
+        jobs.append(("mineskin", lambda: scrape_mineskin(depth["mineskin"], known_by_source["mineskin"], incremental)))
 
     scraped = []
     for name, fn in jobs:
@@ -613,7 +743,6 @@ def main():
     for src, cnt in sorted(by_source.items(), key=lambda kv: -kv[1]):
         print(f"  {src:<12} {cnt}")
 
-    # Write ONLY the required fields, with totals at the TOP of the file.
     output_data = [project(e) for e in existing]
     payload = {
         "total": len(output_data),

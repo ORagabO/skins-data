@@ -451,12 +451,8 @@ def derive_id(e):
 
 
 def project(e):
-    """Reduce any entry to the required output schema.
-    - name : value or None
-    - image: value or None
-    - download: included ONLY when present
-    - source
-    """
+    """Reduce any entry to the required output schema:
+    source, name (or null), image (or null), download (only if present)."""
     name = e.get("name")
     image = e.get("image") or e.get("image_url")
     download = e.get("download") or e.get("download_url")
@@ -567,7 +563,10 @@ def main():
     by_source = defaultdict(int)
     for e in existing:
         by_source[e.get("source")] += 1
-    print(f"\nAdded {added} new skins. Total now: {len(existing)}. Breakdown: {dict(by_source)}")
+    print(f"\nAdded {added} new skins this run. Total now: {len(existing)}.")
+    print("Skins per source:")
+    for src, cnt in sorted(by_source.items(), key=lambda kv: -kv[1]):
+        print(f"  {src:<12} {cnt}")
 
     # Write ONLY the required fields.
     output_data = [project(e) for e in existing]

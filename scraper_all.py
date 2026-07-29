@@ -86,11 +86,17 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
             url = f"{TL_BASE}/" if n == 1 else f"{TL_BASE}/{n}/"
             print(f"  [tlauncher] Navigating to page {n}/{max_pages} -> {url}")
 
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+          try:
+                # 1. Change wait_until to "networkidle" so it waits for background APIs to finish
+                page.goto(url, wait_until="networkidle", timeout=60000)
+                
+                # 2. Scroll to the bottom of the page to trigger any lazy-loaded XHR scripts
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                
+                # 3. Give the DOM an extra 3 seconds to inject the skins after the scroll
                 page.wait_for_timeout(3000) 
             except Exception as e:
-                print(f"  [tlauncher] Navigation error: {e}")
+                print(f"  [tlauncher] Navigation error or timeout: {e}")
                 break
 
             content = page.content()

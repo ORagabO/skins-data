@@ -86,14 +86,14 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
             url = f"{TL_BASE}/" if n == 1 else f"{TL_BASE}/{n}/"
             print(f"  [tlauncher] Navigating to page {n}/{max_pages} -> {url}")
 
-          try:
-                # 1. Change wait_until to "networkidle" so it waits for background APIs to finish
+            try:
+                # 1. Wait for background APIs to finish loading
                 page.goto(url, wait_until="networkidle", timeout=60000)
                 
-                # 2. Scroll to the bottom of the page to trigger any lazy-loaded XHR scripts
+                # 2. Scroll to the bottom to trigger any lazy-loaded XHR scripts
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 
-                # 3. Give the DOM an extra 3 seconds to inject the skins after the scroll
+                # 3. Give the DOM an extra 3 seconds to inject the skins
                 page.wait_for_timeout(3000) 
             except Exception as e:
                 print(f"  [tlauncher] Navigation error or timeout: {e}")
@@ -102,17 +102,13 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
             content = page.content()
             found_ids = set()
             
-            # --- THE FIX: Double Regex Net ---
-            
-            # 1. Grab IDs from the Download links
+            # --- Double Regex Net ---
             for m in re.finditer(r'/download/(\d+)\.png', content):
                 found_ids.add(m.group(1))
                 
-            # 2. Grab IDs from the Image Thumbnails (Guaranteed to be there)
             for m in re.finditer(r'/catalog/skins/(\d+)/img', content):
                 found_ids.add(m.group(1))
-
-            # ---------------------------------
+            # ------------------------
 
             print(f"  [tlauncher] DEBUG: Found {len(found_ids)} total skins on this page.")
 

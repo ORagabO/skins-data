@@ -473,10 +473,15 @@ def load_existing(path):
         try:
             with open(path) as f:
                 data = json.load(f)
+            # New format: {"total":..., "sources":..., "skins":[...]}
+            if isinstance(data, dict) and isinstance(data.get("skins"), list):
+                print(f"Loaded {len(data['skins'])} existing skins from {abspath}")
+                return data["skins"]
+            # Old format: a bare list of skins
             if isinstance(data, list):
                 print(f"Loaded {len(data)} existing skins from {abspath}")
                 return data
-            print(f"WARNING: {abspath} is not a list; treating as first run.")
+            print(f"WARNING: {abspath} has unexpected shape; treating as first run.")
         except Exception as e:
             print(f"WARNING: couldn't read {abspath} ({e}); treating as first run.")
     else:
@@ -568,10 +573,15 @@ def main():
     for src, cnt in sorted(by_source.items(), key=lambda kv: -kv[1]):
         print(f"  {src:<12} {cnt}")
 
-    # Write ONLY the required fields.
+    # Write ONLY the required fields, with totals at the TOP of the file.
     output_data = [project(e) for e in existing]
+    payload = {
+        "total": len(output_data),
+        "sources": dict(by_source),
+        "skins": output_data,
+    }
     with open(OUTPUT, "w") as f:
-        json.dump(output_data, f, indent=4)
+        json.dump(payload, f, indent=4)
     print(f"Saved {len(output_data)} skins to {OUTPUT}.")
 
 if __name__ == "__main__":

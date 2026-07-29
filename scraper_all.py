@@ -66,6 +66,7 @@ window.chrome = { runtime: {} };
 
 # -------------------------------------------------------------- TLauncher ---
 # -------------------------------------------------------------- TLauncher ---
+# -------------------------------------------------------------- TLauncher ---
 TL_BASE = "https://tlauncher.org/en/catalog/skins/"
 
 def scrape_tlauncher(max_pages, known_ids, incremental):
@@ -76,8 +77,8 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
     known_streak = 0
 
     for n in range(1, max_pages + 1):
-        # TLauncher pagination uses /page/n/ 
-        url = TL_BASE if n == 1 else f"{TL_BASE}page/{n}/"
+        # TLauncher pagination uses /skins/2/, /skins/3/ ...
+        url = TL_BASE if n == 1 else f"{TL_BASE}{n}/"
         print(f"  [tlauncher] page {n}/{max_pages} -> {url}")
 
         try:
@@ -90,15 +91,17 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
 
         soup = BeautifulSoup(r.text, "html.parser")
         
-        # Loosened regex to ignore the language prefix (e.g., /en/) and capture the ID properly
-        download_links = soup.find_all("a", href=re.compile(r'/download/(\d+)(?:\.png)?'))
+        # Targeting the exact class provided in the HTML snippet
+        download_links = soup.find_all("a", class_="set-download")
 
         page_new = 0
         found_any = False
 
         for link in download_links:
-            href = link.get("href")
-            m = re.search(r'/download/(\d+)(?:\.png)?', href)
+            href = link.get("href", "")
+            
+            # Extract ID from the href (e.g., /catalog/skins/download/1.png)
+            m = re.search(r'download/(\d+)\.png', href)
             if not m:
                 continue
                 
@@ -112,7 +115,6 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
             if sid not in known_ids:
                 page_new += 1
 
-            # Build absolute URLs
             dl_url = href if href.startswith("http") else f"https://tlauncher.org{href}"
             image_url = f"https://tlauncher.org/catalog/skins/{sid}/img/0/"
 
@@ -125,8 +127,9 @@ def scrape_tlauncher(max_pages, known_ids, incremental):
                 "id": sid,
             })
 
+        # If we didn't find any unique IDs on this page, stop to prevent infinite loops
         if not found_any:
-            print("  [tlauncher] No skins found on this page. Stopping.")
+            print("  [tlauncher] No new skins found on this page (duplicates or empty). Stopping.")
             break
             
         if page_new == 0 and incremental:

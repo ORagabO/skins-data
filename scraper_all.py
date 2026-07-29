@@ -66,83 +66,84 @@ window.chrome = { runtime: {} };
 
 # -------------------------------------------------------------- TLauncher ---
 # -------------------------------------------------------------- TLauncher ---
-# -------------------------------------------------------------- TLauncher ---
-TL_BASE = "https://tlauncher.org/en/catalog/skins/"
+TL_BASE = "https://tlauncher.org/en/catalog/skins"
 
 def scrape_tlauncher(max_pages, known_ids, incremental):
-    import cloudscraper
-    scraper = cloudscraper.create_scraper(
-        browser={"browser": "chrome", "platform": "linux", "desktop": True})
+    from playwright.sync_api import sync_playwright
     out, seen = [], set()
     known_streak = 0
 
-    for n in range(1, max_pages + 1):
-        # Using the exact pagination structure you provided (e.g., .../skins/2/, .../skins/3/)
-        url = TL_BASE if n == 1 else f"{TL_BASE}{n}/"
-        print(f"  [tlauncher] page {n}/{max_pages} -> {url}")
+    with sync_playwright() as p:
+        # Launching browser exactly like Skindex/NameMC to bypass protection
+        browser = p.chromium.launch(headless=False, args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox", "--disable-dev-shm-usage", "--start-maximized"])
+        ctx = browser.new_context(user_agent=UA,
+                                  viewport={"width": 1366, "height": 768}, locale="en-US")
+        ctx.add_init_script(STEALTH_JS)
+        page = ctx.new_page()
 
-        try:
-            r = scraper.get(url, timeout=60)
-        except Exception as e:
-            print(f"  [tlauncher] request error: {e}"); break
+        for n in range(1, max_pages + 1):
+            # Using the exact URL structure you requested
+            url = f"{TL_BASE}/{n}/"
+            print(f"  [tlauncher] page {n}/{max_pages} -> {url}")
 
-        if r.status_code != 200:
-            print(f"  [tlauncher] status {r.status_code}, stopping."); break
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                # Force the script to wait until at least one skin is visible on the page
+                page.wait_for_selector(".set-download", timeout=15000)
+            except Exception as e:
+                print(f"  [tlauncher] nav error or challenge blocked: {e}")
+                break
 
-        # -------------------------------------------------------------------
-        # NEW APPROACH: Pure Regex on raw HTML instead of BeautifulSoup
-        # This completely bypasses any missing classes or DOM structural issues
-        # -------------------------------------------------------------------
-        found_ids = set()
+            # Extract the fully rendered HTML
+            content = page.content()
+            found_ids = set()
+            
+            # Scrape IDs directly from the rendered DOM
+            for m in re.finditer(r'/download/(\d+)\.png', content):
+                found_ids.add(m.group(1))
+                
+            if not found_ids:
+                print("  [tlauncher] No skins found on this page. Stopping.")
+                break
+                
+            page_new = 0
+            
+            for sid in found_ids:
+                if sid in seen:
+                    continue
+                seen.add(sid)
+                
+                if sid not in known_ids:
+                    page_new += 1
+
+                dl_url = f"https://tlauncher.org/catalog/skins/download/{sid}.png"
+                image_url = f"https://tlauncher.org/catalog/skins/{sid}/img/0/"
+
+                out.append({
+                    "source": "tlauncher",
+                    "name": f"TLauncher Skin {sid}",
+                    "image_url": image_url,
+                    "download_url": dl_url,
+                    "downloads": None,
+                    "id": sid,
+                })
+
+            if page_new == 0 and incremental:
+                known_streak += 1
+                if known_streak >= STOP_AFTER_KNOWN_PAGES:
+                    print("  [tlauncher] reached known skins; stopping."); break
+            elif page_new == 0:
+                print(f"  [tlauncher] Found {len(found_ids)} skins, but all were duplicates. Stopping to prevent loop.")
+                break
+            else:
+                known_streak = 0
+                
+            time.sleep(1.5)
+
+        browser.close()
         
-        # 1. Match IDs from the download buttons (e.g., href="/catalog/skins/download/1.png")
-        for m in re.finditer(r'/download/(\d+)\.png', r.text):
-            found_ids.add(m.group(1))
-            
-        # 2. Backup Match: Catch IDs from the image sources (e.g., src="/catalog/skins/1/img/0/")
-        for m in re.finditer(r'/catalog/skins/(\d+)/img/', r.text):
-            found_ids.add(m.group(1))
-            
-        if not found_ids:
-            print("  [tlauncher] No skins found on this page (Challenge or end of list). Stopping.")
-            break
-            
-        page_new = 0
-        
-        for sid in found_ids:
-            if sid in seen:
-                continue
-            seen.add(sid)
-            
-            if sid not in known_ids:
-                page_new += 1
-
-            dl_url = f"https://tlauncher.org/catalog/skins/download/{sid}.png"
-            image_url = f"https://tlauncher.org/catalog/skins/{sid}/img/0/"
-
-            out.append({
-                "source": "tlauncher",
-                "name": f"TLauncher Skin {sid}",
-                "image_url": image_url,
-                "download_url": dl_url,
-                "downloads": None,
-                "id": sid,
-            })
-
-        # Logic to safely stop if we stop finding new skins
-        if page_new == 0 and incremental:
-            known_streak += 1
-            if known_streak >= STOP_AFTER_KNOWN_PAGES:
-                print("  [tlauncher] reached known skins; stopping."); break
-        elif page_new == 0:
-            print(f"  [tlauncher] Found {len(found_ids)} skins, but all were duplicates. Stopping to prevent loop.")
-            break
-        else:
-            known_streak = 0
-            
-        # Slightly increased delay to ensure TLauncher doesn't rate-limit pagination
-        time.sleep(2) 
-
     return out
 # -------------------------------------------------------------- Xyrios ---
 XYRIOS_BASE = "https://xyrios.com/minecraft/skins"

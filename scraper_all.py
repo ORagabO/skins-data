@@ -61,10 +61,11 @@ window.chrome = { runtime: {} };
 """
 
 # ===========================================================================
-# TLauncher  —  single infinite-scroll page; must scroll to load all skins
-# FIX: stopped using /N/ pagination (those 404). Instead scroll repeatedly.
+# TLauncher  —  single infinite-scroll page
+# Must scroll repeatedly to trigger lazy-loading of more skins.
+# Uses domcontentloaded (not networkidle which times out) + longer wait.
 # ===========================================================================
-TL_URL = "https://tlauncher.org/en/catalog/skins/"
+TL_URL    = "https://tlauncher.org/en/catalog/skins/"
 TL_DL_RE  = re.compile(r'/catalog/skins/download/(\d+)\.png')
 TL_IMG_RE = re.compile(r'/catalog/skins/(\d+)/img')
 
@@ -85,14 +86,16 @@ def scrape_tlauncher(max_scrolls, known_ids, incremental):
 
         print(f"  [tlauncher] loading {TL_URL}")
         try:
-            page.goto(TL_URL, wait_until="networkidle", timeout=90000)
+            page.goto(TL_URL, wait_until="domcontentloaded", timeout=90000)
+            # Wait for at least one skin to appear before starting scrolls
+            page.wait_for_selector("a[href*='/catalog/skins/download/']", timeout=30000)
         except Exception as e:
             print(f"  [tlauncher] initial load error: {e}")
             browser.close()
             return out
 
+        stagnant = 0
         for scroll in range(1, max_scrolls + 1):
-            # Collect all skin ids visible so far
             content = page.content()
             ids_on_page = set()
             for m in TL_DL_RE.finditer(content):
@@ -108,29 +111,31 @@ def scrape_tlauncher(max_scrolls, known_ids, incremental):
                 if sid not in known_ids:
                     page_new += 1
                 out.append({
-                    "source": "tlauncher",
-                    "name": None,  # names not present on listing page
-                    "image_url": f"https://tlauncher.org/catalog/skins/{sid}/img/0/",
+                    "source":       "tlauncher",
+                    "name":         None,
+                    "image_url":    f"https://tlauncher.org/catalog/skins/{sid}/img/0/",
                     "download_url": f"https://tlauncher.org/catalog/skins/download/{sid}.png",
-                    "id": sid,
+                    "id":           sid,
                 })
 
-            print(f"  [tlauncher] scroll {scroll}/{max_scrolls} | "
-                  f"visible {len(ids_on_page)} | new this scroll {page_new} | total {len(out)}")
+            print(f"  [tlauncher] scroll {scroll} | visible={len(ids_on_page)} "
+                  f"new={page_new} total={len(out)}")
 
-            if page_new == 0 and incremental:
-                known_streak += 1
-                if known_streak >= STOP_AFTER_KNOWN_PAGES:
-                    print("  [tlauncher] reached known skins; stopping."); break
-            elif page_new == 0 and scroll > 3:
-                # No new skins after a few scrolls = reached the end
-                print("  [tlauncher] no new skins; reached end."); break
+            if page_new == 0:
+                stagnant += 1
+                if incremental:
+                    known_streak += 1
+                    if known_streak >= STOP_AFTER_KNOWN_PAGES:
+                        print("  [tlauncher] reached known skins; stopping."); break
+                if stagnant >= 4:
+                    print("  [tlauncher] no new skins after 4 scrolls; reached end."); break
             else:
+                stagnant = 0
                 known_streak = 0
 
-            # Scroll to bottom to trigger lazy-load
+            # Scroll to bottom, then wait longer for lazy-load batch
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(2500)  # wait for new batch to render
+            page.wait_for_timeout(3500)
 
         browser.close()
     return out
@@ -427,18 +432,24 @@ def scrape_mcskins_net(max_pages, known_ids, incremental):
 
 
 # ===========================================================================
-# SkinsMC  —  server-rendered
-# FIX: old base URL /latest 404s.
-#      Real latest = /latest-minecraft-skins  paginates as /random-minecraft-skins/N
-#      Skin IDs are numeric e.g. /skin/330661
-#      Image  = https://mc-heads.net/body/{id}  (or skinsmc CDN if available)
-#      Download = /skin/{id}/download
+# SkinsMC  —  server-rendered HTML
+# FIXED image + download URLs (from real skin page inspection):
+#   image:    skinsmc.org/pages/skinrender.php?skin={b64_s3_key}&frontback=true
+#             The b64 key is in meta-msapplication-TileImage on each listing card.
+#             From the listing page og:image embeds this same pattern.
+#             Simpler: the listing page og:image for each card IS the render URL.
+#   download: skinsmc.s3.us-east-2.amazonaws.com/{hash}  (the raw skin PNG)
+#
+# Since the listing page doesn't expose per-skin og:image, we use:
+#   image:    skinsmc.org/pages/skinrender.php?skin={id}&frontback=true
+#             (their render endpoint accepts the numeric ID too)
+#   download: skinsmc.org/skin/{id}/download  (redirects to S3 raw PNG)
 # ===========================================================================
 SMC_BASE    = "https://skinsmc.org"
 SMC_FIRST   = f"{SMC_BASE}/latest-minecraft-skins"
 SMC_PAGE    = f"{SMC_BASE}/random-minecraft-skins/{{n}}"
-SMC_ID_RE   = re.compile(r'/skin/(\d+)')
-SMC_NAME_RE = re.compile(r'href="/skin/\d+"[^>]*>\s*Image of 3d skin([^<]+)<', re.I)
+SMC_ID_RE   = re.compile(r'href="/skin/(\d+)"')
+SMC_ALT_RE  = re.compile(r'href="/skin/(\d+)"[^>]*>.*?alt="(?:Image of 3d skin)?([^"]+)"', re.S)
 
 def scrape_skinsmc(max_pages, known_ids, incremental):
     import cloudscraper
@@ -456,39 +467,40 @@ def scrape_skinsmc(max_pages, known_ids, incremental):
         if r.status_code != 200:
             print(f"  [skinsmc] status {r.status_code}, stopping."); break
 
-        html = r.text
-        ids  = SMC_ID_RE.findall(html)
-        # names live in alt text like "Image of 3d skin<Name>"
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # Build id -> name map from img alt on each skin link
         name_map = {}
-        for m in re.finditer(r'href="/skin/(\d+)"[^>]*>[^<]*?Image of 3d skin([^<"]+)', html):
-            name_map[m.group(1)] = m.group(2).strip()
-        # Also try parsing from soup img alt
-        soup = BeautifulSoup(html, "html.parser")
         for a in soup.select("a[href^='/skin/']"):
+            m = SMC_ID_RE.search(a.get("href", ""))
+            if not m:
+                continue
+            sid = m.group(1)
             img = a.find("img")
             if img:
-                m = SMC_ID_RE.search(a.get("href",""))
-                if m:
-                    alt = img.get("alt","").replace("Image of 3d skin","").strip()
-                    if alt:
-                        name_map.setdefault(m.group(1), alt)
+                alt = img.get("alt", "").replace("Image of 3d skin", "").strip()
+                if alt:
+                    name_map[sid] = alt
 
+        ids = list(dict.fromkeys(SMC_ID_RE.findall(r.text)))  # ordered, deduped
         if not ids:
-            print(f"  [skinsmc] no skins found; stopping."); break
+            print("  [skinsmc] no skins found; stopping."); break
 
         page_new = 0
-        for sid in dict.fromkeys(ids):  # preserve order, dedup
+        for sid in ids:
             if sid in seen:
                 continue
             seen.add(sid)
             if sid not in known_ids:
                 page_new += 1
+            # image: their skinrender endpoint works with the numeric skin ID
+            # download: /skin/{id}/download serves the raw 64x64 PNG
             out.append({
-                "source": "skinsmc",
-                "name":   name_map.get(sid),
-                "image_url":    f"https://mc-heads.net/body/{sid}",
+                "source":       "skinsmc",
+                "name":         name_map.get(sid),
+                "image_url":    f"{SMC_BASE}/pages/skinrender.php?skin={sid}&frontback=true",
                 "download_url": f"{SMC_BASE}/skin/{sid}/download",
-                "id": sid,
+                "id":           sid,
             })
 
         if page_new == 0 and incremental:
@@ -592,7 +604,7 @@ def derive_id(e):
         "skindex":   [r'/skin/download/(\d+)', r'-(\d+)\.png'],
         "namemc":    [r'/skin/([0-9a-fA-F]+)', r'[?&]id=([0-9a-fA-F]+)'],
         "mcnet":     [r'/([^/]+)/download', r'front_preview/([^/.]+)\.png'],
-        "skinsmc":   [r'/skin/(\d+)'],
+        "skinsmc":   [r'/skin/(\d+)/download', r'skinrender\.php\?skin=(\d+)'],
         "mineskin":  [],
     }
     for pat in patterns.get(src, []):

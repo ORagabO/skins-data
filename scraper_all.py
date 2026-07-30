@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 # Multi-source Minecraft skin collector  —  INITIAL BACKFILL + INCREMENTAL
 #
 # Sources: TLauncher, Xyrios, The Skindex, NameMC, minecraftskins.net,
-#          SkinsMC, MineSkin
+#          MineSkin
 #
 # OUTPUT schema:
 #   { "source", "name" (or null), "image" (or null), "download" (omitted if absent) }
@@ -22,7 +22,6 @@ ENABLE_XYRIOS    = True
 ENABLE_SKINDEX   = True
 ENABLE_NAMEMC    = True
 ENABLE_MCNET     = True
-ENABLE_LABY      = True   # replaces SkinsMC
 ENABLE_MINESKIN  = True
 
 # ---- initial depths -------------------------------------------------------
@@ -31,7 +30,6 @@ INIT_XYRIOS    = 8000  # pages (24 real skins/page = ~192k)
 INIT_SKINDEX   = 1000  # pages (~48/page, browser, Cloudflare limited)
 INIT_NAMEMC    = 1000  # pages (browser, Cloudflare limited)
 INIT_MCNET     = 100   # pages (~12/page, full feed ~300)
-INIT_LABY      = 5000  # API pages (36/page = ~180k, no browser needed)
 INIT_MINESKIN  = 500   # cursor pages (50/page, 3s/req = ~25min)
 
 # ---- incremental depths ---------------------------------------------------
@@ -40,7 +38,6 @@ UPD_XYRIOS    = 30
 UPD_SKINDEX   = 40
 UPD_NAMEMC    = 40
 UPD_MCNET     = 30
-UPD_LABY      = 100
 UPD_MINESKIN  = 10
 
 STOP_AFTER_KNOWN_PAGES = 2
@@ -447,75 +444,6 @@ def scrape_mcskins_net(max_pages, known_ids, incremental):
 
 
 # ===========================================================================
-# laby.net  —  JSON search API, no browser needed, 25M+ skins
-# Replaces SkinsMC. API returns texture hashes; image is their render CDN,
-# download is the canonical Mojang texture URL.
-# ===========================================================================
-LABY_API    = "https://laby.net/api/v3/search/textures/skin"
-LABY_RENDER = "https://laby.net/api/v3/render/skin/{h}.png?height=500&width=500"
-LABY_DL     = "https://textures.minecraft.net/texture/{h}"
-
-def _laby_first(d, keys):
-    for k in keys:
-        v = d.get(k)
-        if v not in (None, "", []):
-            return v
-    return None
-
-def scrape_laby(max_pages, known_ids, incremental):
-    import cloudscraper
-    scraper = cloudscraper.create_scraper(
-        browser={"browser": "chrome", "platform": "linux", "desktop": True})
-    out, seen, known_streak = [], set(), 0
-    size = 36
-
-    for n in range(max_pages):
-        offset = n * size
-        params = f"?order=most_used&size={size}&offset={offset}"
-        print(f"  [laby] page {n+1}/{max_pages} offset={offset}")
-        try:
-            r = scraper.get(LABY_API + params, timeout=60)
-        except Exception as e:
-            print(f"  [laby] request error: {e}"); break
-        if r.status_code != 200:
-            print(f"  [laby] status {r.status_code}, stopping."); break
-
-        data = r.json()
-        items = data if isinstance(data, list) else _laby_first(
-            data, ["results", "data", "textures", "skins", "hits"]) or []
-        if not items:
-            print("  [laby] no more items."); break
-
-        page_new = 0
-        for sk in items:
-            h = _laby_first(sk, ["hash", "image_hash", "id", "texture_id"])
-            if not h or h in seen:
-                continue
-            seen.add(h)
-            if h not in known_ids:
-                page_new += 1
-            out.append({
-                "source":       "laby",
-                "name":         _laby_first(sk, ["name", "title", "display_name"]),
-                "image_url":    LABY_RENDER.format(h=h),
-                "download_url": LABY_DL.format(h=h),
-                "id":           h,
-            })
-
-        if page_new == 0 and incremental:
-            known_streak += 1
-            if known_streak >= STOP_AFTER_KNOWN_PAGES:
-                print("  [laby] reached known skins; stopping."); break
-        elif page_new == 0:
-            print("  [laby] no new skins; reached end."); break
-        else:
-            known_streak = 0
-        time.sleep(1.2)
-
-    return out
-
-
-# ===========================================================================
 # MineSkin  —  REST API v2, cursor-based pagination
 # FIXED: cursor lives at pagination.next.after (not pagination.next directly)
 # FIXED: texture is a plain hash string, not a nested object
@@ -612,8 +540,6 @@ def derive_id(e):
         "skindex":   [r'/skin/download/(\d+)', r'-(\d+)\.png'],
         "namemc":    [r'/skin/([0-9a-fA-F]+)', r'[?&]id=([0-9a-fA-F]+)'],
         "mcnet":     [r'/([^/]+)/download', r'front_preview/([^/.]+)\.png'],
-        "laby":      [r'/render/skin/([a-f0-9]{32})\.png',
-                      r'textures\.minecraft\.net/texture/([a-f0-9]{32})'],
         "mineskin":  [],
     }
     for pat in patterns.get(src, []):
@@ -674,10 +600,10 @@ def main():
         known_by_source[e.get("source")].add(e.get("id"))
 
     depth = (dict(tlauncher=INIT_TLAUNCHER, xyrios=INIT_XYRIOS, skindex=INIT_SKINDEX,
-                  namemc=INIT_NAMEMC, mcnet=INIT_MCNET, laby=INIT_LABY, mineskin=INIT_MINESKIN)
+                  namemc=INIT_NAMEMC, mcnet=INIT_MCNET, mineskin=INIT_MINESKIN)
              if first_run else
              dict(tlauncher=UPD_TLAUNCHER, xyrios=UPD_XYRIOS, skindex=UPD_SKINDEX,
-                  namemc=UPD_NAMEMC, mcnet=UPD_MCNET, laby=UPD_LABY, mineskin=UPD_MINESKIN))
+                  namemc=UPD_NAMEMC, mcnet=UPD_MCNET, mineskin=UPD_MINESKIN))
 
     jobs = []
     if ENABLE_TLAUNCHER: jobs.append(("tlauncher", lambda: scrape_tlauncher(depth["tlauncher"], known_by_source["tlauncher"], incremental)))
@@ -685,7 +611,6 @@ def main():
     if ENABLE_SKINDEX:   jobs.append(("skindex",   lambda: scrape_skindex  (depth["skindex"],   known_by_source["skindex"],   incremental)))
     if ENABLE_NAMEMC:    jobs.append(("namemc",    lambda: scrape_namemc   (depth["namemc"],    known_by_source["namemc"],    incremental)))
     if ENABLE_MCNET:     jobs.append(("mcnet",     lambda: scrape_mcskins_net(depth["mcnet"],   known_by_source["mcnet"],     incremental)))
-    if ENABLE_LABY:      jobs.append(("laby",      lambda: scrape_laby     (depth["laby"],      known_by_source["laby"],      incremental)))
     if ENABLE_MINESKIN:  jobs.append(("mineskin",  lambda: scrape_mineskin (depth["mineskin"],  known_by_source["mineskin"],  incremental)))
 
     scraped = []

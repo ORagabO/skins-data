@@ -61,83 +61,98 @@ window.chrome = { runtime: {} };
 """
 
 # ===========================================================================
-# TLauncher  —  single infinite-scroll page
-# Must scroll repeatedly to trigger lazy-loading of more skins.
-# Uses domcontentloaded (not networkidle which times out) + longer wait.
+# TLauncher  —  internal API (no browser needed)
+# The launcher itself calls mps.tlauncher.org/api/client/gameentities to load
+# skins. It supports ?type=SKIN&page=N&sort=POPULAR with standard pagination.
+# Image: rescl.tlauncher.org/b/pictures/compress/{id}.png
+# Download: same URL (it IS the raw skin PNG)
 # ===========================================================================
-TL_URL    = "https://tlauncher.org/en/catalog/skins/"
-TL_DL_RE  = re.compile(r'/catalog/skins/download/(\d+)\.png')
-TL_IMG_RE = re.compile(r'/catalog/skins/(\d+)/img')
+TL_API = ("https://mps.tlauncher.org/api/client/gameentities"
+          "?type=SKIN&sort=POPULAR&page={page}")
+TL_IMG = "https://rescl.tlauncher.org/b/pictures/compress/{id}.png"
+TL_UA  = ("TLauncher/2.9 (Minecraft Launcher; Java/17; "
+          "Windows 10; x86_64) Apache-HttpClient/4.5")
 
-def scrape_tlauncher(max_scrolls, known_ids, incremental):
-    from playwright.sync_api import sync_playwright
-    out, seen = [], set()
-    known_streak = 0
+def scrape_tlauncher(max_pages, known_ids, incremental):
+    import cloudscraper
+    scraper = cloudscraper.create_scraper()
+    scraper.headers.update({"User-Agent": TL_UA})
+    out, seen, known_streak = [], set(), 0
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False, args=[
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox", "--disable-dev-shm-usage", "--start-maximized"])
-        ctx = browser.new_context(user_agent=UA,
-                                  viewport={"width": 1366, "height": 900},
-                                  locale="en-US")
-        ctx.add_init_script(STEALTH_JS)
-        page = ctx.new_page()
-
-        print(f"  [tlauncher] loading {TL_URL}")
+    for n in range(max_pages):
+        url = TL_API.format(page=n)
+        print(f"  [tlauncher] page {n}/{max_pages}")
         try:
-            page.goto(TL_URL, wait_until="domcontentloaded", timeout=90000)
-            # Wait for at least one skin to appear before starting scrolls
-            page.wait_for_selector("a[href*='/catalog/skins/download/']", timeout=30000)
+            r = scraper.get(url, timeout=60)
         except Exception as e:
-            print(f"  [tlauncher] initial load error: {e}")
-            browser.close()
-            return out
+            print(f"  [tlauncher] request error: {e}"); break
 
-        stagnant = 0
-        for scroll in range(1, max_scrolls + 1):
-            content = page.content()
-            ids_on_page = set()
-            for m in TL_DL_RE.finditer(content):
-                ids_on_page.add(m.group(1))
-            for m in TL_IMG_RE.finditer(content):
-                ids_on_page.add(m.group(1))
+        if r.status_code == 401:
+            print("  [tlauncher] 401 unauthorised — API requires login; stopping.")
+            break
+        if r.status_code != 200:
+            print(f"  [tlauncher] status {r.status_code}, stopping."); break
 
-            page_new = 0
-            for sid in ids_on_page:
-                if sid in seen:
-                    continue
-                seen.add(sid)
-                if sid not in known_ids:
-                    page_new += 1
-                out.append({
-                    "source":       "tlauncher",
-                    "name":         None,
-                    "image_url":    f"https://tlauncher.org/catalog/skins/{sid}/img/0/",
-                    "download_url": f"https://tlauncher.org/catalog/skins/download/{sid}.png",
-                    "id":           sid,
-                })
+        try:
+            data = r.json()
+        except Exception as e:
+            print(f"  [tlauncher] bad JSON: {e}"); break
 
-            print(f"  [tlauncher] scroll {scroll} | visible={len(ids_on_page)} "
-                  f"new={page_new} total={len(out)}")
+        # API may return a list directly or wrap in a dict
+        items = data if isinstance(data, list) else (
+            data.get("content") or data.get("entities") or
+            data.get("data") or data.get("items") or [])
 
-            if page_new == 0:
-                stagnant += 1
-                if incremental:
-                    known_streak += 1
-                    if known_streak >= STOP_AFTER_KNOWN_PAGES:
-                        print("  [tlauncher] reached known skins; stopping."); break
-                if stagnant >= 4:
-                    print("  [tlauncher] no new skins after 4 scrolls; reached end."); break
-            else:
-                stagnant = 0
-                known_streak = 0
+        if not items:
+            print("  [tlauncher] no items in response; stopping."); break
 
-            # Scroll to bottom, then wait longer for lazy-load batch
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(3500)
+        if n == 0:
+            print(f"  [tlauncher] SAMPLE ITEM KEYS: {list(items[0].keys())}")
+            print(f"  [tlauncher] SAMPLE ITEM: {str(items[0])[:300]}")
 
-        browser.close()
+        page_new = 0
+        for item in items:
+            # try common ID field names
+            sid = (item.get("id") or item.get("entityId") or
+                   item.get("skinId") or item.get("fileId"))
+            if not sid:
+                continue
+            sid = str(sid)
+            if sid in seen:
+                continue
+            seen.add(sid)
+            if sid not in known_ids:
+                page_new += 1
+
+            name = (item.get("name") or item.get("title") or
+                    item.get("displayName") or None)
+            # image field may be a direct URL or just the id
+            img_raw = (item.get("imageUrl") or item.get("image") or
+                       item.get("previewUrl") or item.get("preview") or
+                       item.get("pictureUrl") or "")
+            img = img_raw if img_raw.startswith("http") else TL_IMG.format(id=sid)
+            dl_raw = (item.get("downloadUrl") or item.get("download") or
+                      item.get("fileUrl") or "")
+            dl = dl_raw if dl_raw.startswith("http") else TL_IMG.format(id=sid)
+
+            out.append({
+                "source":       "tlauncher",
+                "name":         name,
+                "image_url":    img,
+                "download_url": dl,
+                "id":           sid,
+            })
+
+        if page_new == 0 and incremental:
+            known_streak += 1
+            if known_streak >= STOP_AFTER_KNOWN_PAGES:
+                print("  [tlauncher] reached known skins; stopping."); break
+        elif page_new == 0:
+            print("  [tlauncher] no new skins; reached end."); break
+        else:
+            known_streak = 0
+        time.sleep(1.2)
+
     return out
 
 

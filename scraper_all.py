@@ -547,11 +547,16 @@ def scrape_mineskin(max_pages, known_ids, incremental):
             # texture is a plain hash string (confirmed from live API response)
             tex_hash = sk.get("texture")
             if isinstance(tex_hash, dict):
-                # guard in case API changes shape
                 tex_hash = (tex_hash.get("hash") or tex_hash.get("id")
                             or tex_hash.get("url","").rsplit("/",1)[-1])
-            img = LABY_RENDER.format(h=tex_hash) if tex_hash else None
-            dl  = LABY_DL.format(h=tex_hash)     if tex_hash else None
+            if tex_hash:
+                texture_url = f"http://textures.minecraft.net/texture/{tex_hash}"
+                encoded     = texture_url.replace(":", "%3A").replace("/", "%2F")
+                img = (f"https://render.mineskin.org/render"
+                       f"?overlay=true&body=true&scale=10&slim=false&url={encoded}")
+                dl  = f"https://mineskin.org/textures/{tex_hash}?attachment"
+            else:
+                img, dl = None, None
             out.append({
                 "source":       "mineskin",
                 "name":         sk.get("name") or None,
